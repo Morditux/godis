@@ -14,13 +14,23 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+
+    # a real redis instance is required by the replication tests
+    # (TestReplicationSlaveSide, TestReplicationFailover dial 127.0.0.1:6379);
+    # pin a version whose RDB format is supported by github.com/hdt3213/rdb
+    services:
+      redis:
+        image: redis:6-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
     steps:
     - uses: actions/checkout@v4
-
-    - uses: zhulik/redis-action@1.1.0
-      with:
-        redis-version: '5'
-        number of databases: 16
 
     - uses: actions/setup-go@v5
       with:

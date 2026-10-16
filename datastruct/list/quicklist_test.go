@@ -106,7 +106,10 @@ func TestQuickList_RemoveLast(t *testing.T) {
 
 func TestQuickListRemoveVal(t *testing.T) {
 	list := NewQuickList[int]()
-	size := pageSize * 10
+	// keep the workload moderate: this test is O(n^2) (each Remove by value
+	// scans the list), so a size of pageSize*10 makes CI runs slow under the
+	// race detector. pageSize*2 still spans several pages.
+	size := pageSize * 2
 	for i := 0; i < size; i++ {
 		list.Add(i)
 		list.Add(i)
