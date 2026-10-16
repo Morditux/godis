@@ -74,7 +74,11 @@ func (persister *Persister) startGenerateRDB(newListener Listener, hook func()) 
 	}
 
 	// get current aof file size
-	fileInfo, _ := os.Stat(persister.aofFilename)
+	fileInfo, err := os.Stat(persister.aofFilename)
+	if err != nil {
+		logger.Errorf("stat aof file failed: %v", err)
+		return nil, err
+	}
 	filesize := fileInfo.Size()
 	// create tmp file
 	file, err := os.CreateTemp(config.GetTmpDir(), "*.aof")

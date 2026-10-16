@@ -67,6 +67,8 @@ func (c *Connection) Close() error {
 	c.watching = nil
 	c.txErrors = nil
 	c.selectedDB = 0
+	// reset role/multi flags as well, otherwise they leak into a recycled connection
+	c.flags = 0
 	connPool.Put(c)
 	return nil
 }
@@ -83,7 +85,6 @@ func NewConn(conn net.Conn) *Connection {
 	c.conn = conn
 	return c
 }
-
 
 // Write sends response to client over tcp connection
 func (c *Connection) Write(b []byte) (int, error) {

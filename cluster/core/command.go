@@ -45,6 +45,9 @@ func (cluster *Cluster) Exec(c redis.Connection, cmdLine [][]byte) (result redis
 	if cmdName == "ping" {
 		return database.Ping(c, cmdLine[1:])
 	}
+	if !isAuthenticated(c) {
+		return protocol.MakeErrReply("NOAUTH Authentication required")
+	}
 	if cmdName == "dbsize" {
 		dbsize, _ := cluster.db.GetDBSize(0)
 		return protocol.MakeIntReply(int64(dbsize))
@@ -60,9 +63,6 @@ func (cluster *Cluster) Exec(c redis.Connection, cmdLine [][]byte) (result redis
 		return cluster.slogLogger.HandleSlowlogCommand(cmdLine)
 	}
 
-	if !isAuthenticated(c) {
-		return protocol.MakeErrReply("NOAUTH Authentication required")
-	}
 	cmdFunc, ok := commands[cmdName]
 	if !ok {
 		return protocol.MakeErrReply("ERR unknown command '" + cmdName + "', or not supported in cluster mode")

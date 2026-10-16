@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/raft"
 )
@@ -95,6 +96,68 @@ func TestNodeLifecycle(t *testing.T) {
 	err = node.Close()
 	if err != nil {
 		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+// TestFailoverCallback verifies that FSM changes are wired to the failover
+// watcher: after EventFinishFailover is applied, onFailover must receive the
+// new master address and the route must be updated
+func TestFailoverCallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &RaftConfig{
+		RedisAdvertiseAddr: "127.0.0.1:8002",
+		RaftListenAddr:     "127.0.0.1:9002",
+		Dir:                tmpDir,
+	}
+	node, err := StartNode(cfg)
+	if err != nil {
+		t.Fatalf("StartNode failed: %v", err)
+	}
+	defer func() {
+		if cerr := node.Close(); cerr != nil {
+			t.Logf("close node: %v", cerr)
+		}
+	}()
+
+	failoverCh := make(chan string, 1)
+	node.SetOnFailover(func(newMaster string) {
+		failoverCh <- newMaster
+	})
+
+	if err := node.BootstrapCluster(10); err != nil {
+		t.Fatalf("BootstrapCluster failed: %v", err)
+	}
+
+	// join as slave of self
+	newMaster := "127.0.0.1:8003"
+	if _, err := node.Propose(&LogEntry{
+		Event:    EventJoin,
+		JoinTask: &JoinTask{NodeId: newMaster, Master: cfg.RedisAdvertiseAddr},
+	}); err != nil {
+		t.Fatalf("propose join failed: %v", err)
+	}
+
+	// failover: old master (self) is replaced by the slave
+	if _, err := node.Propose(&LogEntry{
+		Event:        EventFinishFailover,
+		FailoverTask: &FailoverTask{ID: "f1", OldMasterId: cfg.RedisAdvertiseAddr, NewMasterId: newMaster},
+	}); err != nil {
+		t.Fatalf("propose failover failed: %v", err)
+	}
+
+	select {
+	case master := <-failoverCh:
+		if master != newMaster {
+			t.Fatalf("expected new master %s, got %s", newMaster, master)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("onFailover was not invoked within 5s")
+	}
+
+	if m := node.FSM.GetMaster(cfg.RedisAdvertiseAddr); m != newMaster {
+		t.Fatalf("expected %s to become slave of %s, got %q", cfg.RedisAdvertiseAddr, newMaster, m)
 	}
 }
 

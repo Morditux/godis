@@ -66,7 +66,7 @@ func StartNode(cfg *RaftConfig) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	// todo: mkdir if possible
+	// create raft data dir if necessary
 	if err := os.MkdirAll(cfg.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create raft dir: %w", err)
 	}
@@ -108,6 +108,10 @@ func StartNode(cfg *RaftConfig) (*Node, error) {
 		transport:     transport,
 	}
 	node.setupWatch()
+	// wire the watcher so that FSM changes trigger failover handling.
+	// FSM.Apply / FSM.Restore invoke `changed` while holding fsm.mu,
+	// and watcher.watch only reads fsm.SlaveMasters, so this is safe under the lock.
+	node.FSM.changed = node.watcher.watch
 	return node, nil
 }
 
@@ -202,7 +206,7 @@ func (node *Node) Propose(event *LogEntry) (uint64, error) {
 	return future.Index(), nil
 }
 
-// setupWatch will be called after any changes of FSM within lock.
+// setupWatch creates the watcher callback which is invoked after any FSM change (wired via FSM.changed).
 func (node *Node) setupWatch() {
 	node.watcher.watch = func(f *FSM) {
 		newMaster := f.SlaveMasters[node.Self()]

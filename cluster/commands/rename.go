@@ -38,7 +38,9 @@ func execRename(cluster *core.Cluster, c redis.Connection, cmdLine CmdLine) redi
 	targetSlot := cluster.GetSlot(target)
 	targetNode := cluster.PickNode(targetSlot)
 	if srcNode == targetNode {
-		cmdLine[0] = []byte("rename")
+		// keys are hosted by the same node, execute through the local handler of the target node
+		// rewrite cmd to `*_` to avoid re-routing
+		cmdLine[0] = []byte("rename_")
 		return cluster.Relay(srcNode, c, cmdLine)
 	}
 	routeMap := RouteMap{
@@ -90,7 +92,9 @@ func execRenameNx(cluster *core.Cluster, c redis.Connection, cmdLine CmdLine) re
 	targetSlot := cluster.GetSlot(target)
 	targetNode := cluster.PickNode(targetSlot)
 	if srcNode == targetNode {
-		cmdLine[0] = []byte("rename")
+		// keys are hosted by the same node, execute through the local handler of the target node
+		// rewrite cmd to `*_` to avoid re-routing
+		cmdLine[0] = []byte("renamenx_")
 		return cluster.Relay(srcNode, c, cmdLine)
 	}
 	routeMap := RouteMap{

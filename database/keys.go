@@ -499,9 +499,9 @@ func init() {
 		attachCommandExtra([]string{redisFlagReadonly, redisFlagFast}, 1, 1, 1)
 	registerCommand("Type", execType, readFirstKey, nil, 2, flagReadOnly).
 		attachCommandExtra([]string{redisFlagReadonly, redisFlagFast}, 1, 1, 1)
-	registerCommand("Rename", execRename, prepareRename, undoRename, 3, flagReadOnly).
+	registerCommand("Rename", execRename, prepareRename, undoRename, 3, flagWrite).
 		attachCommandExtra([]string{redisFlagWrite}, 1, 1, 1)
-	registerCommand("RenameNx", execRenameNx, prepareRename, undoRename, 3, flagReadOnly).
+	registerCommand("RenameNx", execRenameNx, prepareRename, undoRename, 3, flagWrite).
 		attachCommandExtra([]string{redisFlagWrite, redisFlagFast}, 1, 1, 1)
 	registerCommand("Keys", execKeys, noPrepare, nil, 2, flagReadOnly).
 		attachCommandExtra([]string{redisFlagReadonly, redisFlagSortForScript}, 1, 1, 1)

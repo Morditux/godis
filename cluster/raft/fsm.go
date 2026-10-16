@@ -24,7 +24,7 @@ type FSM struct {
 	MasterSlaves map[string]*MasterSlave   // masterId -> MasterSlave
 	SlaveMasters map[string]string         // slaveId -> masterId
 	Failovers    map[string]*FailoverTask  // taskId -> task
-	changed      func(*FSM)                // called while fsm changed, within readlock
+	changed      func(*FSM)                // called after each FSM change, under fsm.mu write lock (Apply/Restore)
 }
 
 type MasterSlave struct {

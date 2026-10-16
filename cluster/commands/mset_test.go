@@ -40,3 +40,22 @@ func TestMsetNx(t *testing.T) {
 	res = node1.Exec(c, utils.ToCmdLine("get", "3"))
 	asserts.AssertNullBulk(t, res)
 }
+
+// TestMSetNxRegistered checks that the "msetnx" command is bound to execMSetNx
+// (NX semantics) when dispatched through Exec, instead of the plain execMSet gateway
+func TestMSetNxRegistered(t *testing.T) {
+	id1 := "1"
+	id2 := "2"
+	nodes := core.MakeTestCluster([]string{id1, id2})
+	node1 := nodes[id1]
+	c := connection.NewFakeConn()
+
+	res := node1.Exec(c, utils.ToCmdLine("msetnx", "1", "1", "2", "2"))
+	asserts.AssertIntReply(t, res, 1)
+
+	// one of the new keys already exists: MSETNX must fail as a whole
+	res = node1.Exec(c, utils.ToCmdLine("msetnx", "1", "x", "3", "3"))
+	asserts.AssertIntReply(t, res, 0)
+	core.RegisterDefaultCmd("get")
+	asserts.AssertNullBulk(t, node1.Exec(c, utils.ToCmdLine("get", "3")))
+}

@@ -38,5 +38,15 @@ func (node *Node) GetNodes() ([]raft.Server, error) {
 func (node *Node) GetSlaves(id string) *MasterSlave {
 	node.FSM.mu.RLock()
 	defer node.FSM.mu.RUnlock()
-	return node.FSM.MasterSlaves[id]
+	ms := node.FSM.MasterSlaves[id]
+	if ms == nil {
+		return nil
+	}
+	// return a copy so that the caller can safely read it after the lock is released
+	cp := &MasterSlave{
+		MasterId: ms.MasterId,
+		Slaves:   make([]string, len(ms.Slaves)),
+	}
+	copy(cp.Slaves, ms.Slaves)
+	return cp
 }

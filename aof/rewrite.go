@@ -36,8 +36,7 @@ func (persister *Persister) Rewrite() error {
 		return err
 	}
 
-	persister.FinishRewrite(ctx)
-	return nil
+	return persister.FinishRewrite(ctx)
 }
 
 // DoRewrite actually rewrite aof file
@@ -67,7 +66,11 @@ func (persister *Persister) StartRewrite() (*RewriteCtx, error) {
 	}
 
 	// get current aof file size
-	fileInfo, _ := os.Stat(persister.aofFilename)
+	fileInfo, err := os.Stat(persister.aofFilename)
+	if err != nil {
+		logger.Errorf("stat aof file failed: %v", err)
+		return nil, err
+	}
 	filesize := fileInfo.Size()
 
 	// create tmp file
@@ -84,7 +87,7 @@ func (persister *Persister) StartRewrite() (*RewriteCtx, error) {
 }
 
 // FinishRewrite finish rewrite procedure
-func (persister *Persister) FinishRewrite(ctx *RewriteCtx) {
+func (persister *Persister) FinishRewrite(ctx *RewriteCtx) error {
 	persister.pausingAof.Lock() // pausing aof
 	defer persister.pausingAof.Unlock()
 	tmpFile := ctx.tmpFile
@@ -123,7 +126,7 @@ func (persister *Persister) FinishRewrite(ctx *RewriteCtx) {
 		return false
 	}()
 	if errOccurs {
-		return
+		return nil // errors have already been logged; keep the current aof file as is
 	}
 
 	// replace current aof file by tmp file
@@ -134,7 +137,10 @@ func (persister *Persister) FinishRewrite(ctx *RewriteCtx) {
 	// reopen aof file for further write
 	aofFile, err := os.OpenFile(persister.aofFilename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		panic(err)
+		// log instead of panic: this function is usually invoked within a background goroutine,
+		// a panic here will crash the whole server
+		logger.Errorf("reopen aof file failed: %v", err)
+		return err
 	}
 	persister.aofFile = aofFile
 
@@ -143,6 +149,8 @@ func (persister *Persister) FinishRewrite(ctx *RewriteCtx) {
 	data := protocol.MakeMultiBulkReply(utils.ToCmdLine("SELECT", strconv.Itoa(persister.currentDB))).ToBytes()
 	_, err = persister.aofFile.Write(data)
 	if err != nil {
-		panic(err)
+		logger.Errorf("rewrite aof file select db failed: %v", err)
+		return err
 	}
+	return nil
 }

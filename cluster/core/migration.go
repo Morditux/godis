@@ -101,7 +101,7 @@ func (cluster *Cluster) dropSlot(index uint32) {
 	slot := cluster.slotsManager.slots[index]
 	cluster.slotsManager.mu.RUnlock()
 	if slot == nil {
-		return 
+		return
 	}
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
@@ -259,8 +259,8 @@ func execFinishExport(cluster *Cluster, c redis.Connection, cmdLine CmdLine) red
 	logger.Infof("finishing migration task %s, route changed", taskId)
 
 	// clean migrated slots
-	go func()  {
-		defer func()  {
+	go func() {
+		defer func() {
 			if e := recover(); e != nil {
 				logger.Errorf("panic %v", e)
 			}
@@ -274,7 +274,7 @@ func execFinishExport(cluster *Cluster, c redis.Connection, cmdLine CmdLine) red
 }
 
 // execStartMigration receives startMigrationCommand from leader and start migration job at background
-// command line: startMigrationCommand taskId 
+// command line: startMigrationCommand taskId
 func execStartMigration(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.Reply {
 	if len(cmdLine) != 2 {
 		return protocol.MakeArgNumErrReply(startMigrationCommand)
@@ -322,7 +322,7 @@ func (cluster *Cluster) doImports(task *raft.MigratingTask) error {
 recvLoop:
 	for proto := range stream.Stream() {
 		if proto.Err != nil {
-			return fmt.Errorf("export error: %v", err)
+			return fmt.Errorf("export error: %v", proto.Err)
 		}
 		switch reply := proto.Data.(type) {
 		case *protocol.MultiBulkReply:
@@ -333,13 +333,13 @@ recvLoop:
 				break recvLoop
 			} else {
 				msg := fmt.Sprintf("migrate error: %s", string(reply.ToBytes()))
-				logger.Errorf(msg)
+				logger.Errorf("%s", msg)
 				return protocol.MakeErrReply(msg)
 			}
 		case protocol.ErrorReply:
 			// todo: return slot to former host node
 			msg := fmt.Sprintf("migrate error: %s", reply.Error())
-			logger.Errorf(msg)
+			logger.Errorf("%s", msg)
 			return protocol.MakeErrReply(msg)
 		}
 	}
@@ -354,7 +354,7 @@ recvLoop:
 recvLoop2:
 	for proto := range stream2.Stream() {
 		if proto.Err != nil {
-			return fmt.Errorf("export error: %v", err)
+			return fmt.Errorf("export error: %v", proto.Err)
 		}
 		switch reply := proto.Data.(type) {
 		case *protocol.MultiBulkReply:
@@ -365,13 +365,13 @@ recvLoop2:
 				break recvLoop2
 			} else {
 				msg := fmt.Sprintf("migrate error: %s", string(reply.ToBytes()))
-				logger.Errorf(msg)
+				logger.Errorf("%s", msg)
 				return protocol.MakeErrReply(msg)
 			}
 		case protocol.ErrorReply:
 			// todo: return slot to former host node
 			msg := fmt.Sprintf("migrate error: %s", reply.Error())
-			logger.Errorf(msg)
+			logger.Errorf("%s", msg)
 			return protocol.MakeErrReply(msg)
 		}
 	}

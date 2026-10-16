@@ -14,10 +14,10 @@ import (
 )
 
 /*
-1. The master and slave are both added to the raft group, and failover does not involve changes of raft members. 
+1. The master and slave are both added to the raft group, and failover does not involve changes of raft members.
 2. Timer job `doFailoverCheck` finds timeout masters, then calls `triggerFailover`
 3. Raft leader sends `slaveof no one` to new master
-4. Raft proposes `EventFinishFailover` to change route. 
+4. Raft proposes `EventFinishFailover` to change route.
 Other slaves and old master will get this message from raft, and become slave of new master.(see cluster.registerOnFailover)
 */
 
@@ -76,21 +76,22 @@ func (cluster *Cluster) doFailoverCheck() {
 	// find timeout masters
 	var timeoutMasters []*raft.MasterSlave
 	ddl := time.Now().Add(-followerTimeout)
-	cluster.replicaManager.mu.RLock()
+	// take the write lock because this loop may initialize heartbeats of newly joined nodes
+	cluster.replicaManager.mu.Lock()
 	for masterId, lastTime := range cluster.replicaManager.masterHeartbeats {
-		if lastTime.Second() == 0 {
+		if lastTime.IsZero() {
 			// do not set new joined node as timeout
 			cluster.replicaManager.masterHeartbeats[masterId] = time.Now()
+			continue
 		}
 		if lastTime.Before(ddl) {
 			slaves := cluster.raftNode.GetSlaves(masterId)
 			if slaves != nil && len(slaves.Slaves) > 0 {
 				timeoutMasters = append(timeoutMasters, slaves)
 			}
-
 		}
 	}
-	cluster.replicaManager.mu.RUnlock()
+	cluster.replicaManager.mu.Unlock()
 
 	// trigger failover
 	for _, failed := range timeoutMasters {

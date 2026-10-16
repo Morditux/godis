@@ -12,7 +12,7 @@ var (
 	_subscribe         = "subscribe"
 	_unsubscribe       = "unsubscribe"
 	messageBytes       = []byte("message")
-	unSubscribeNothing = []byte("*3\r\n$11\r\nunsubscribe\r\n$-1\n:0\r\n")
+	unSubscribeNothing = []byte("*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n")
 )
 
 func makeMsg(t string, channel string, code int64) []byte {

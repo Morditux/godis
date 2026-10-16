@@ -361,7 +361,12 @@ func (server *Server) ExecWithLock(conn redis.Connection, cmdLine [][]byte) redi
 
 // BGRewriteAOF asynchronously rewrites Append-Only-File
 func BGRewriteAOF(db *Server, args [][]byte) redis.Reply {
-	go db.persister.Rewrite()
+	go func() {
+		// the error must be logged here: an unhandled panic/error in a bare goroutine would crash the server
+		if err := db.persister.Rewrite(); err != nil {
+			logger.Errorf("background aof rewrite failed: %v", err)
+		}
+	}()
 	return protocol.MakeStatusReply("Background append only file rewriting started")
 }
 

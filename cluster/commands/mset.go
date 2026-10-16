@@ -15,7 +15,7 @@ func init() {
 	core.RegisterCmd("mget_", execMGetInLocal)
 	core.RegisterCmd("mget", execMGet)
 	core.RegisterCmd("msetnx_", execMSetNxInLocal)
-	core.RegisterCmd("msetnx", execMSet)
+	core.RegisterCmd("msetnx", execMSetNx)
 }
 
 // execMSetInLocal executes msets in local node
