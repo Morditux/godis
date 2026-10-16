@@ -7,6 +7,7 @@ import (
 	"github.com/hdt3213/godis/redis/protocol"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -16,6 +17,25 @@ import (
 // implementation at startup so that the database package does not depend on
 // the transport layer. Implementations must be goroutine-safe.
 var ClientCountFunc = func() int64 { return 0 }
+
+// getVcsRevision returns the git revision and dirty flag of the running
+// binary (embedded by the go tool when it is built inside a git repository)
+func getVcsRevision() (string, bool) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false
+	}
+	rev, dirty := "", false
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			rev = setting.Value
+		case "vcs.modified":
+			dirty = setting.Value == "true"
+		}
+	}
+	return rev, dirty
+}
 
 // Ping the server
 func Ping(c redis.Connection, args [][]byte) redis.Reply {
@@ -88,10 +108,11 @@ func GenGodisInfoString(section string, db *Server) []byte {
 	startUpTimeFromNow := getGodisRuninngTime()
 	switch section {
 	case "server":
+		gitSha1, gitDirty := getVcsRevision()
 		s := fmt.Sprintf("# Server\r\n"+
 			"godis_version:%s\r\n"+
-			//"godis_git_sha1:%s\r\n"+
-			//"godis_git_dirty:%d\r\n"+
+			"godis_git_sha1:%s\r\n"+
+			"godis_git_dirty:%d\r\n"+
 			//"godis_build_id:%s\r\n"+
 			"godis_mode:%s\r\n"+
 			"os:%s %s\r\n"+
@@ -107,8 +128,8 @@ func GenGodisInfoString(section string, db *Server) []byte {
 			//"lru_clock:%d\r\n"+
 			"config_file:%s\r\n",
 			godisVersion,
-			//TODO,
-			//TODO,
+			gitSha1,
+			boolToInt(gitDirty),
 			//TODO,
 			getGodisRunningMode(),
 			runtime.GOOS, runtime.GOARCH,
@@ -125,15 +146,15 @@ func GenGodisInfoString(section string, db *Server) []byte {
 			config.GetConfigFilePath())
 		return []byte(s)
 	case "client":
+		// godis writes responses synchronously, so there is no output buffer
+		// to report; and its parser consumes the input in bounded slices,
+		// hence client_recent_max_input_buffer does not apply either
 		s := fmt.Sprintf("# Clients\r\n"+
-			"connected_clients:%d\r\n",
-			//"client_recent_max_input_buffer:%d\r\n"+
-			//"client_recent_max_output_buffer:%d\r\n"+
-			//"blocked_clients:%d\n",
+			"connected_clients:%d\r\n"+
+			"blocked_clients:%d\r\n",
 			ClientCountFunc(),
-			//TODO,
-			//TODO,
-			//TODO,
+			// no blocking commands (BLPOP etc.) are supported, so this is 0
+			0,
 		)
 		return []byte(s)
 	case "cluster":
@@ -179,6 +200,13 @@ func getGodisRunningMode() string {
 // getGodisRuninngTime return the running time of godis
 func getGodisRuninngTime() time.Duration {
 	return time.Since(config.EachTimeServerInfo.StartUpTime) / time.Second
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func getDbSize(dbIndex, keys, expiresKeys int, ttl int64) []byte {

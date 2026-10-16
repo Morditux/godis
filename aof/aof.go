@@ -111,6 +111,14 @@ func NewPersister(db database.DBEngine, filename string, load bool, fsync string
 	return persister, nil
 }
 
+// AddListener adds a listener to aof callback, so aof payloads are
+// forwarded to it after being written
+func (persister *Persister) AddListener(listener Listener) {
+	persister.pausingAof.Lock()
+	defer persister.pausingAof.Unlock()
+	persister.listeners[listener] = struct{}{}
+}
+
 // RemoveListener removes a listener from aof handler, so we can close the listener
 func (persister *Persister) RemoveListener(listener Listener) {
 	persister.pausingAof.Lock()
