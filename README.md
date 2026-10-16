@@ -1,19 +1,31 @@
 # Godis
 
-![license](https://img.shields.io/github/license/HDT3213/godis)
-[![Build Status](https://github.com/hdt3213/godis/actions/workflows/coverall.yml/badge.svg)](https://github.com/HDT3213/godis/actions?query=branch%3Amaster)
-[![Coverage Status](https://coveralls.io/repos/github/HDT3213/godis/badge.svg?branch=master)](https://coveralls.io/github/HDT3213/godis?branch=master)
-[![Go Report Card](https://goreportcard.com/badge/github.com/HDT3213/godis)](https://goreportcard.com/report/github.com/HDT3213/godis)
+![license](https://img.shields.io/github/license/Morditux/godis)
+[![Build Status](https://github.com/Morditux/godis/actions/workflows/coverall.yml/badge.svg?query=branch%3Afork_fixes)](https://github.com/Morditux/godis/actions?query=branch%3Afork_fixes)
 [![Go Reference](https://pkg.go.dev/badge/github.com/hdt3213/godis.svg)](https://pkg.go.dev/github.com/hdt3213/godis)
 <br>
 [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge-flat.svg)](https://github.com/avelino/awesome-go)
 
-[中文版](https://github.com/hdt3213/godis/blob/master/README_CN.md)
+[中文版 (upstream)](https://github.com/hdt3213/godis/blob/master/README_CN.md)
 
 `Godis` is a golang implementation of Redis Server, which intents to provide an example of writing a high concurrent
 middleware using golang.
 
-Key Features:
+This is a hardened fork of [hdt3213/godis](https://github.com/HDT3213/godis). **About this fork:**
+
+- **Race free**: data races fixed across the server core, cluster/TCC, AOF, Pub/Sub, connections and logger. The full
+  test suite runs with `go test -race ./...` in CI on every push.
+- **Leak free & safer shutdown**: goroutine leak fixes, idempotent `Close` on AOF/persister/connections, synchronized
+  gnet server boot and graceful time-wheel stop.
+- **Bug fixes**: cluster & Raft metadata management, replication, persistence and command edge cases.
+- **Go generics for core data structures**: `dict.Dict[V]`, `list.List[T]` and the hash set now store concrete types,
+  removing `interface{}` conversions from hot paths (database entities, hashes, lists, Pub/Sub hubs, cluster pools…).
+- **More tests**: new suites for AOF (replay, fsync policies, listeners), Pub/Sub, connection state machine and logger;
+  `INFO` now reports the real `godis_git_sha1` / `godis_git_dirty` and `blocked_clients`.
+- **Repo hygiene**: gofmt & `go vet` clean, dependencies updated (raft-boltdb v2 with Go 1.24), CI enabled on this
+  repository.
+
+Key Features (inherited from upstream):
 
 - Support string, list, hash, set, sorted set, bitmap
 - Concurrent Core for better performance
@@ -30,40 +42,40 @@ Key Features:
   - `MSET`, `MSETNX`, `DEL`, `Rename`, `RenameNX` command is supported and atomically executed in cluster mode, allow over multi node.
   - `MULTI` Commands Transaction is supported within slot in cluster mode
 
-If you could read Chinese, you can find more details in [My Blog](https://www.cnblogs.com/Finley/category/1598973.html).
+If you could read Chinese, you can find more details in [the author's blog](https://www.cnblogs.com/Finley/category/1598973.html).
 
 ## Get Started
 
-You can get runnable program in the releases of this repository, which supports Linux and Darwin system.
+### Build from source
+
+Requires Go 1.24+:
 
 ```bash
-./godis-darwin
+git clone https://github.com/Morditux/godis.git
+cd godis
+go build -o godis
 ```
 
-```bash
-./godis-linux
-```
-
-![](https://i.loli.net/2021/05/15/oQM1yZ6pWm3AIEj.png)
-
-You could use redis-cli or other redis client to connect godis server, which listens on 0.0.0.0:6399 on default mode.
-
-![](https://i.loli.net/2021/05/15/7WquEgonzY62sZI.png)
+### Run
 
 The program will try to read config file path from environment variable `CONFIG`.
 
 If environment variable is not set, then the program try to read `redis.conf` in the working directory.
 
-Please see [example.conf](./example.conf) for all configuration information.
+```bash
+CONFIG=example.conf ./godis
+```
 
-### cluster mode
+You could use redis-cli or other redis client to connect godis server, which listens on 0.0.0.0:6399 on default mode.
+
+### Cluster mode
 
 We provide node1.conf and node2.conf for demonstration. use following command line to start a two-node-cluster:
 
 ```bash
-CONFIG=node1.conf ./godis-darwin &
-CONFIG=node2.conf ./godis-darwin &
-``` 
+CONFIG=node1.conf ./godis &
+CONFIG=node2.conf ./godis &
+```
 
 Connect to a node in the cluster to access all data in the cluster:
 
@@ -75,16 +87,31 @@ Please refer to [example.conf](./example.conf) for cluster configuration.
 
 ## Supported Commands
 
-See: [commands.md](https://github.com/HDT3213/godis/blob/master/commands.md)
+See: [commands.md](./commands.md)
+
+## Tests
+
+Run the full test suite with the race detector (same as CI):
+
+```bash
+go test -race -count=1 ./...
+```
+
+Only the two replication tests in `database` (`TestReplicationSlaveSide`, `TestReplicationFailover`) need a real Redis
+server listening on `127.0.0.1:6379`:
+
+```bash
+docker run -d --name godis-redis-test -p 6379:6379 redis:latest redis-server --save '' --appendonly no
+```
 
 ## Benchmark
+
+Report from the upstream project (redis-benchmark against a single godis node):
 
 Environment:
 
 Go version：1.23
 System: MacOS Monterey 12.5 M2 Air
-
-Performance report by redis-benchmark: 
 
 ```
 PING_INLINE: 179211.45 requests per second, p50=1.031 msec                    
@@ -111,51 +138,49 @@ MSET (10 keys): 88417.33 requests per second, p50=3.687 msec
 
 ## Read My Code
 
-If you want to read my code in this repository, here is a simple guidance.
+If you want to read the code in this repository, here is a simple guidance.
 
-- project root: only the entry point
+- project root: the entry point (`main.go` builds the standalone binary)
 - config: config parser
-- interface: some interface definitions
-- lib: some utils, such as logger, sync utils and wildcard
+- interface: interface definitions (`redis`, `database`, `tcp`)
+- lib: utils - logger, pool, semaphore, id generator, geohash, consistent hash, wildcard
 
-I suggest focusing on the following directories:
+The core packages:
 
-- tcp: the tcp server
-- redis: the redis protocol parser
-- datastruct: the implements of data structures
-    - dict: a concurrent hash map
-    - list: a linked list
-    - lock: it is used to lock keys to ensure thread safety
-    - set: a hash set based on map
-    - sortedset: a sorted set implements based on skiplist
-- database: the core of storage engine
-    - server.go: a standalone redis server, with multiple database
-    - database.go: data structure and base functions of single database
-    - exec.go: the gateway of database
+- tcp: transport interfaces shared by std `net` and gnet servers
+- redis:
+    - connection: connection representation and command properties
+    - parser: RESP parser
+    - protocol: protocol types and replies (with `asserts` helpers for tests)
+    - server/std and server/gnet: two server drivers
+    - client: a RESP client used by the cluster
+- datastruct: self-contained data structures
+    - bitmap: bitmap utilities
+    - dict: generic concurrent hash map (`dict.Dict[V]`)
+    - list: generic list (`list.List[T]` linked list and quick list)
+    - lock: hashed key locks for thread safety
+    - set: hash set built on the generic dict
+    - sortedset: sorted set based on skiplist
+- database: the storage engine core
+    - server.go: a standalone redis server with multiple databases
+    - database.go: data structure and base functions of a single database
     - router.go: the command table
-    - keys.go: handlers for keys commands
-    - string.go: handlers for string commands
-    - list.go: handlers for list commands
-    - hash.go: handlers for hash commands
-    - set.go: handlers for set commands
-    - sortedset.go: handlers for sorted set commands
-    - pubsub.go: implements of publish / subscribe
-    - aof.go: implements of AOF persistence and rewrite
-    - geo.go: implements of geography features
-    - sys.go: authentication and other system function
-    - transaction.go: local transaction
-- cluster: 
+    - keys.go / string.go / list.go / hash.go / set.go / sortedset.go / geo.go: command handlers
+    - transaction.go: local transaction (MULTI/EXEC/WATCH)
+    - tx_utils.go: undo utilities for transaction rollback
+    - persistence.go: TTL, keys loading, RDB
+    - replication_master.go / replication_slave.go: replication
+    - slowlog.go: slow log
+    - systemcmd.go: authentication, INFO and other system commands
+    - cluster_helper.go: helpers shared with cluster mode
+- pubsub: publish/subscribe (channels and sharded hub)
+- aof: AOF persistence, fsync policies, rewrite and command marshalling
+- cluster:
     - cluster.go: entrance of cluster mode
-    - com.go: communication within nodes
-    - del.go: atomic implementation of `delete` command in cluster
-    - keys.go: keys command
-    - mset.go: atomic implementation of `mset` command in cluster
-    - multi.go: entrance of distributed transaction
-    - pubsub.go: pub/sub in cluster
-    - rename.go: `rename` command in cluster 
-    - tcc.go: try-commit-catch distributed transaction implementation
-- aof: AOF persistence
+    - core: node connections, cron jobs, node/replica managers and the try-commit-catch (TCC) distributed transaction
+    - raft: Raft based cluster metadata management (topology, rebalancing, failover)
+    - commands: atomic multi-node commands (`DEL`, `MSET`, `RENAME`, TCC helpers)
 
 # License
 
-This project is licensed under the [GPL license](https://github.com/hdt3213/godis/blob/master/LICENSE).
+This project inherits the [GPL license](./LICENSE) of [hdt3213/godis](https://github.com/HDT3213/godis/blob/master/LICENSE).
