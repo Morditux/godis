@@ -10,26 +10,26 @@ import (
 	"strings"
 )
 
-func (db *DB) getAsDict(key string) (Dict.Dict, protocol.ErrorReply) {
+func (db *DB) getAsDict(key string) (Dict.Dict[[]byte], protocol.ErrorReply) {
 	entity, exists := db.GetEntity(key)
 	if !exists {
 		return nil, nil
 	}
-	dict, ok := entity.Data.(Dict.Dict)
+	dict, ok := entity.Data.(Dict.Dict[[]byte])
 	if !ok {
 		return nil, &protocol.WrongTypeErrReply{}
 	}
 	return dict, nil
 }
 
-func (db *DB) getOrInitDict(key string) (dict Dict.Dict, inited bool, errReply protocol.ErrorReply) {
+func (db *DB) getOrInitDict(key string) (dict Dict.Dict[[]byte], inited bool, errReply protocol.ErrorReply) {
 	dict, errReply = db.getAsDict(key)
 	if errReply != nil {
 		return nil, false, errReply
 	}
 	inited = false
 	if dict == nil {
-		dict = Dict.MakeSimple()
+		dict = Dict.MakeSimple[[]byte]()
 		db.PutEntity(key, &database.DataEntity{
 			Data: dict,
 		})
@@ -101,8 +101,7 @@ func execHGet(db *DB, args [][]byte) redis.Reply {
 	if !exists {
 		return &protocol.NullBulkReply{}
 	}
-	value, _ := raw.([]byte)
-	return protocol.MakeBulkReply(value)
+	return protocol.MakeBulkReply(raw)
 }
 
 // execHExists checks if a hash field exists
@@ -202,8 +201,7 @@ func execHStrlen(db *DB, args [][]byte) redis.Reply {
 
 	raw, exists := dict.Get(field)
 	if exists {
-		value, _ := raw.([]byte)
-		return protocol.MakeIntReply(int64(len(value)))
+		return protocol.MakeIntReply(int64(len(raw)))
 	}
 	return protocol.MakeIntReply(0)
 }
@@ -272,8 +270,7 @@ func execHMGet(db *DB, args [][]byte) redis.Reply {
 		if !ok {
 			result[i] = nil
 		} else {
-			bytes, _ := value.([]byte)
-			result[i] = bytes
+			result[i] = value
 		}
 	}
 	return protocol.MakeMultiBulkReply(result)
@@ -293,7 +290,7 @@ func execHKeys(db *DB, args [][]byte) redis.Reply {
 
 	fields := make([][]byte, dict.Len())
 	i := 0
-	dict.ForEach(func(key string, val interface{}) bool {
+	dict.ForEach(func(key string, val []byte) bool {
 		fields[i] = []byte(key)
 		i++
 		return true
@@ -316,8 +313,8 @@ func execHVals(db *DB, args [][]byte) redis.Reply {
 
 	values := make([][]byte, dict.Len())
 	i := 0
-	dict.ForEach(func(key string, val interface{}) bool {
-		values[i], _ = val.([]byte)
+	dict.ForEach(func(key string, val []byte) bool {
+		values[i] = val
 		i++
 		return true
 	})
@@ -340,10 +337,10 @@ func execHGetAll(db *DB, args [][]byte) redis.Reply {
 	size := dict.Len()
 	result := make([][]byte, size*2)
 	i := 0
-	dict.ForEach(func(key string, val interface{}) bool {
+	dict.ForEach(func(key string, val []byte) bool {
 		result[i] = []byte(key)
 		i++
-		result[i], _ = val.([]byte)
+		result[i] = val
 		i++
 		return true
 	})
@@ -371,7 +368,7 @@ func execHIncrBy(db *DB, args [][]byte) redis.Reply {
 		db.addAof(utils.ToCmdLine3("hincrby", args...))
 		return protocol.MakeBulkReply(args[2])
 	}
-	val, err := strconv.ParseInt(string(value.([]byte)), 10, 64)
+	val, err := strconv.ParseInt(string(value), 10, 64)
 	if err != nil {
 		return protocol.MakeErrReply("ERR hash value is not an integer")
 	}
@@ -410,7 +407,7 @@ func execHIncrByFloat(db *DB, args [][]byte) redis.Reply {
 		db.addAof(utils.ToCmdLine3("hincrbyfloat", args...))
 		return protocol.MakeBulkReply(args[2])
 	}
-	val, err := strconv.ParseFloat(string(value.([]byte)), 64)
+	val, err := strconv.ParseFloat(string(value), 64)
 	if err != nil {
 		return protocol.MakeErrReply("ERR hash value is not a float")
 	}
@@ -469,7 +466,7 @@ func execHRandField(db *DB, args [][]byte) redis.Reply {
 			for i, v := range fields {
 				result[2*i] = []byte(v)
 				raw, _ := dict.Get(v)
-				result[2*i+1] = raw.([]byte)
+				result[2*i+1] = raw
 			}
 			return protocol.MakeMultiBulkReply(result)
 		}
@@ -487,7 +484,7 @@ func execHRandField(db *DB, args [][]byte) redis.Reply {
 			for i, v := range fields {
 				result[2*i] = []byte(v)
 				raw, _ := dict.Get(v)
-				result[2*i+1] = raw.([]byte)
+				result[2*i+1] = raw
 			}
 			return protocol.MakeMultiBulkReply(result)
 		}

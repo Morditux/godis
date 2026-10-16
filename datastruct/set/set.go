@@ -7,13 +7,13 @@ import (
 
 // Set is a set of elements based on hash table
 type Set struct {
-	dict dict.Dict
+	dict dict.Dict[struct{}]
 }
 
 // Make creates a new set
 func Make(members ...string) *Set {
 	set := &Set{
-		dict: dict.MakeSimple(),
+		dict: dict.MakeSimple[struct{}](),
 	}
 	for _, member := range members {
 		set.Add(member)
@@ -24,7 +24,7 @@ func Make(members ...string) *Set {
 // MakeConcurrentSafe creates a new set which is concurrent safe
 func MakeConcurrentSafe(members ...string) *Set {
 	set := &Set{
-		dict: dict.MakeConcurrent(1),
+		dict: dict.MakeConcurrent[struct{}](1),
 	}
 	for _, member := range members {
 		set.Add(member)
@@ -34,7 +34,7 @@ func MakeConcurrentSafe(members ...string) *Set {
 
 // Add adds member into set
 func (set *Set) Add(val string) int {
-	return set.dict.Put(val, nil)
+	return set.dict.Put(val, struct{}{})
 }
 
 // Remove removes member from set
@@ -64,7 +64,7 @@ func (set *Set) Len() int {
 func (set *Set) ToSlice() []string {
 	slice := make([]string, set.Len())
 	i := 0
-	set.dict.ForEach(func(key string, val interface{}) bool {
+	set.dict.ForEach(func(key string, val struct{}) bool {
 		if i < len(slice) {
 			slice[i] = key
 		} else {
@@ -82,7 +82,7 @@ func (set *Set) ForEach(consumer func(member string) bool) {
 	if set == nil || set.dict == nil {
 		return
 	}
-	set.dict.ForEach(func(key string, val interface{}) bool {
+	set.dict.ForEach(func(key string, val struct{}) bool {
 		return consumer(key)
 	})
 }

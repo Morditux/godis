@@ -16,7 +16,7 @@ func TestRollbackGivenKeys(t *testing.T) {
 	testDB.Exec(nil, utils.ToCmdLine("SET", key, value, "EX", "200"))
 	undoCmdLines := rollbackGivenKeys(testDB, key)
 	rawExpire, _ := testDB.ttlMap.Get(key)
-	expireTime, _ := rawExpire.(time.Time)
+	expireTime := rawExpire
 	// override given key
 	value2 := value + utils.RandString(5)
 	testDB.Exec(nil, utils.ToCmdLine("SET", key, value2, "EX", "1000"))
@@ -26,7 +26,7 @@ func TestRollbackGivenKeys(t *testing.T) {
 	actual := testDB.Exec(nil, utils.ToCmdLine("GET", key))
 	asserts.AssertBulkReply(t, actual, value)
 	rawExpire2, _ := testDB.ttlMap.Get(key)
-	expireTime2, _ := rawExpire2.(time.Time)
+	expireTime2 := rawExpire2
 	timeDiff := expireTime.Sub(expireTime2)
 	if timeDiff < -time.Millisecond || timeDiff > time.Millisecond {
 		t.Error("rollback ttl failed")

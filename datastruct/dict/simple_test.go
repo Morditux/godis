@@ -7,7 +7,7 @@ import (
 )
 
 func TestSimpleDict_Keys(t *testing.T) {
-	d := MakeSimple()
+	d := MakeSimple[string]()
 	size := 10
 	var expectKeys []string
 	for i := 0; i < size; i++ {
@@ -33,7 +33,7 @@ func TestSimpleDict_Keys(t *testing.T) {
 }
 
 func TestSimpleDict_PutIfExists(t *testing.T) {
-	d := MakeSimple()
+	d := MakeSimple[string]()
 	key := utils.RandString(5)
 	val := key + "1"
 	ret := d.PutIfExists(key, val)
@@ -55,15 +55,16 @@ func TestSimpleDict_PutIfExists(t *testing.T) {
 }
 
 func TestSimpleDict_Scan(t *testing.T) {
-	d := MakeSimple()
+	d := MakeSimple[string]()
 	size := 10
 	for i := 0; i < size; i++ {
 		str := "a" + utils.RandString(5)
-		d.Put(str, []byte(str))
+		d.Put(str, str)
 	}
+	// scan returns keys only
 	keys, nextCursor := d.DictScan(0, size, "*")
-	if len(keys) != size*2 {
-		t.Errorf("expect %d keys, actual: %d", size*2, len(keys))
+	if len(keys) != size {
+		t.Errorf("expect %d keys, actual: %d", size, len(keys))
 		return
 	}
 	if nextCursor != 0 {
@@ -75,8 +76,8 @@ func TestSimpleDict_Scan(t *testing.T) {
 		d.Put(str, str)
 	}
 	keys, _ = d.DictScan(0, size*2, "a*")
-	if len(keys) != size*2 {
-		t.Errorf("expect %d keys, actual: %d", size*2, len(keys))
+	if len(keys) != size {
+		t.Errorf("expect %d keys, actual: %d", size, len(keys))
 		return
 	}
 }

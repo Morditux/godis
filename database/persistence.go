@@ -55,7 +55,7 @@ func (server *Server) LoadRDB(dec *core.Decoder) error {
 			}
 		case rdb.HashType:
 			hashObj := o.(*rdb.HashObject)
-			hash := dict.MakeSimple()
+			hash := dict.MakeSimple[[]byte]()
 			for k, v := range hashObj.Hash {
 				hash.Put(k, v)
 			}

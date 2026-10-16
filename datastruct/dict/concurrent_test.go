@@ -8,7 +8,7 @@ import (
 )
 
 func TestConcurrentPut(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	var wg sync.WaitGroup
 	wg.Add(count)
@@ -22,7 +22,7 @@ func TestConcurrentPut(t *testing.T) {
 			}
 			val, ok := d.Get(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != i {
 					t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal) + ", key: " + key)
 				}
@@ -37,7 +37,7 @@ func TestConcurrentPut(t *testing.T) {
 }
 
 func TestConcurrentPutWithLock(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	var wg sync.WaitGroup
 	wg.Add(count)
@@ -54,7 +54,7 @@ func TestConcurrentPutWithLock(t *testing.T) {
 			}
 			val, ok := d.GetWithLock(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != i {
 					t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal) + ", key: " + key)
 				}
@@ -70,7 +70,7 @@ func TestConcurrentPutWithLock(t *testing.T) {
 }
 
 func TestConcurrentPutIfAbsent(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	var wg sync.WaitGroup
 	wg.Add(count)
@@ -84,7 +84,7 @@ func TestConcurrentPutIfAbsent(t *testing.T) {
 			}
 			val, ok := d.Get(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != i {
 					t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal) +
 						", key: " + key)
@@ -101,7 +101,7 @@ func TestConcurrentPutIfAbsent(t *testing.T) {
 			}
 			val, ok = d.Get(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != i {
 					t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal) + ", key: " + key)
 				}
@@ -115,7 +115,7 @@ func TestConcurrentPutIfAbsent(t *testing.T) {
 }
 
 func TestConcurrentPutIfAbsentWithLock(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	var wg sync.WaitGroup
 	wg.Add(count)
@@ -132,7 +132,7 @@ func TestConcurrentPutIfAbsentWithLock(t *testing.T) {
 			}
 			val, ok := d.GetWithLock(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != i {
 					t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal) +
 						", key: " + key)
@@ -149,7 +149,7 @@ func TestConcurrentPutIfAbsentWithLock(t *testing.T) {
 			}
 			val, ok = d.GetWithLock(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != i {
 					t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal) + ", key: " + key)
 				}
@@ -164,7 +164,7 @@ func TestConcurrentPutIfAbsentWithLock(t *testing.T) {
 }
 
 func TestConcurrentPutIfExists(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	var wg sync.WaitGroup
 	wg.Add(count)
@@ -183,7 +183,7 @@ func TestConcurrentPutIfExists(t *testing.T) {
 			d.PutIfExists(key, 10*i)
 			val, ok := d.Get(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != 10*i {
 					t.Error("put test failed: expected " + strconv.Itoa(10*i) + ", actual: " + strconv.Itoa(intVal))
 				}
@@ -198,7 +198,7 @@ func TestConcurrentPutIfExists(t *testing.T) {
 }
 
 func TestConcurrentPutIfExistsWithLock(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	var wg sync.WaitGroup
 	wg.Add(count)
@@ -218,7 +218,7 @@ func TestConcurrentPutIfExistsWithLock(t *testing.T) {
 			d.PutIfExistsWithLock(key, 10*i)
 			val, ok := d.GetWithLock(key)
 			if ok {
-				intVal, _ := val.(int)
+				intVal := val
 				if intVal != 10*i {
 					t.Error("put test failed: expected " + strconv.Itoa(10*i) + ", actual: " + strconv.Itoa(intVal))
 				}
@@ -234,7 +234,7 @@ func TestConcurrentPutIfExistsWithLock(t *testing.T) {
 }
 
 func TestConcurrentRemove(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	totalCount := 100
 	// remove head node
 	for i := 0; i < totalCount; i++ {
@@ -250,7 +250,7 @@ func TestConcurrentRemove(t *testing.T) {
 
 		val, ok := d.Get(key)
 		if ok {
-			intVal, _ := val.(int)
+			intVal := val
 			if intVal != i {
 				t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -279,7 +279,7 @@ func TestConcurrentRemove(t *testing.T) {
 	}
 
 	// remove tail node
-	d = MakeConcurrent(0)
+	d = MakeConcurrent[int](0)
 	for i := 0; i < 100; i++ {
 		// insert
 		key := "k" + strconv.Itoa(i)
@@ -290,7 +290,7 @@ func TestConcurrentRemove(t *testing.T) {
 
 		val, ok := d.Get(key)
 		if ok {
-			intVal, _ := val.(int)
+			intVal := val
 			if intVal != i {
 				t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -313,7 +313,7 @@ func TestConcurrentRemove(t *testing.T) {
 	}
 
 	// remove middle node
-	d = MakeConcurrent(0)
+	d = MakeConcurrent[int](0)
 	d.Put("head", 0)
 	for i := 0; i < 10; i++ {
 		// insert
@@ -326,7 +326,7 @@ func TestConcurrentRemove(t *testing.T) {
 
 		val, ok := d.Get(key)
 		if ok {
-			intVal, _ := val.(int)
+			intVal := val
 			if intVal != i {
 				t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -350,7 +350,7 @@ func TestConcurrentRemove(t *testing.T) {
 }
 
 func TestConcurrentRemoveWithLock(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	totalCount := 100
 	// remove head node
 	for i := 0; i < totalCount; i++ {
@@ -366,7 +366,7 @@ func TestConcurrentRemoveWithLock(t *testing.T) {
 
 		val, ok := d.GetWithLock(key)
 		if ok {
-			intVal, _ := val.(int)
+			intVal := val
 			if intVal != i {
 				t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -395,7 +395,7 @@ func TestConcurrentRemoveWithLock(t *testing.T) {
 	}
 
 	// remove tail node
-	d = MakeConcurrent(0)
+	d = MakeConcurrent[int](0)
 	for i := 0; i < 100; i++ {
 		// insert
 		key := "k" + strconv.Itoa(i)
@@ -406,7 +406,7 @@ func TestConcurrentRemoveWithLock(t *testing.T) {
 
 		val, ok := d.GetWithLock(key)
 		if ok {
-			intVal, _ := val.(int)
+			intVal := val
 			if intVal != i {
 				t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -429,7 +429,7 @@ func TestConcurrentRemoveWithLock(t *testing.T) {
 	}
 
 	// remove middle node
-	d = MakeConcurrent(0)
+	d = MakeConcurrent[int](0)
 	d.Put("head", 0)
 	for i := 0; i < 10; i++ {
 		// insert
@@ -442,7 +442,7 @@ func TestConcurrentRemoveWithLock(t *testing.T) {
 
 		val, ok := d.Get(key)
 		if ok {
-			intVal, _ := val.(int)
+			intVal := val
 			if intVal != i {
 				t.Error("put test failed: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -467,7 +467,7 @@ func TestConcurrentRemoveWithLock(t *testing.T) {
 
 // change t.Error remove->forEach
 func TestConcurrentForEach(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	size := 100
 	for i := 0; i < size; i++ {
 		// insert
@@ -475,9 +475,8 @@ func TestConcurrentForEach(t *testing.T) {
 		d.Put(key, i)
 	}
 	i := 0
-	d.ForEach(func(key string, value interface{}) bool {
-		intVal, _ := value.(int)
-		expectedKey := "k" + strconv.Itoa(intVal)
+	d.ForEach(func(key string, value int) bool {
+		expectedKey := "k" + strconv.Itoa(value)
 		if key != expectedKey {
 			t.Error("forEach test failed: expected " + expectedKey + ", actual: " + key)
 		}
@@ -490,7 +489,7 @@ func TestConcurrentForEach(t *testing.T) {
 }
 
 func TestConcurrentRandomKey(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	for i := 0; i < count; i++ {
 		key := "k" + strconv.Itoa(i)
@@ -515,7 +514,7 @@ func TestConcurrentRandomKey(t *testing.T) {
 }
 
 func TestConcurrentDict_Keys(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[string](0)
 	size := 10
 	for i := 0; i < size; i++ {
 		d.Put(utils.RandString(5), utils.RandString(5))
@@ -526,7 +525,7 @@ func TestConcurrentDict_Keys(t *testing.T) {
 }
 
 func TestDictScan(t *testing.T) {
-	d := MakeConcurrent(0)
+	d := MakeConcurrent[int](0)
 	count := 100
 	for i := 0; i < count; i++ {
 		key := "kkk" + strconv.Itoa(i)

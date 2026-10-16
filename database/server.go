@@ -322,8 +322,7 @@ func (server *Server) GetExpiration(dbIndex int, key string) *time.Time {
 	if !ok {
 		return nil
 	}
-	expireTime, _ := raw.(time.Time)
-	return &expireTime
+	return &raw
 }
 
 // ExecMulti executes multi commands transaction Atomically and Isolated
@@ -445,10 +444,9 @@ func (server *Server) GetAvgTTL(dbIndex, randomKeyCount int) int64 {
 		if !ok {
 			continue
 		}
-		expireTime, _ := rawExpireTime.(time.Time)
 		// if the key has already reached its expiration time during calculation, ignore it
-		if expireTime.Sub(t).Microseconds() > 0 {
-			ttlCount += expireTime.Sub(t).Microseconds()
+		if rawExpireTime.Sub(t).Microseconds() > 0 {
+			ttlCount += rawExpireTime.Sub(t).Microseconds()
 		}
 	}
 	return ttlCount / int64(len(keys))

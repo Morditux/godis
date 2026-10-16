@@ -26,11 +26,11 @@ const (
 type DB struct {
 	index int
 	// key -> DataEntity
-	data *dict.ConcurrentDict
+	data *dict.ConcurrentDict[*database.DataEntity]
 	// key -> expireTime (time.Time)
-	ttlMap *dict.ConcurrentDict
+	ttlMap *dict.ConcurrentDict[time.Time]
 	// key -> version(uint32)
-	versionMap *dict.ConcurrentDict
+	versionMap *dict.ConcurrentDict[uint32]
 
 	// addaof is used to add command to aof
 	addAof func(CmdLine)
@@ -58,9 +58,9 @@ type UndoFunc func(db *DB, args [][]byte) []CmdLine
 // makeDB create DB instance
 func makeDB() *DB {
 	db := &DB{
-		data:       dict.MakeConcurrent(dataDictSize),
-		ttlMap:     dict.MakeConcurrent(ttlDictSize),
-		versionMap: dict.MakeConcurrent(dataDictSize),
+		data:       dict.MakeConcurrent[*database.DataEntity](dataDictSize),
+		ttlMap:     dict.MakeConcurrent[time.Time](ttlDictSize),
+		versionMap: dict.MakeConcurrent[uint32](dataDictSize),
 		addAof:     func(line CmdLine) {},
 	}
 	return db
@@ -69,9 +69,9 @@ func makeDB() *DB {
 // makeBasicDB create DB instance only with basic abilities.
 func makeBasicDB() *DB {
 	db := &DB{
-		data:       dict.MakeConcurrent(dataDictSize),
-		ttlMap:     dict.MakeConcurrent(ttlDictSize),
-		versionMap: dict.MakeConcurrent(dataDictSize),
+		data:       dict.MakeConcurrent[*database.DataEntity](dataDictSize),
+		ttlMap:     dict.MakeConcurrent[time.Time](ttlDictSize),
+		versionMap: dict.MakeConcurrent[uint32](dataDictSize),
 		addAof:     func(line CmdLine) {},
 	}
 	return db
@@ -154,14 +154,13 @@ func validateArity(arity int, cmdArgs [][]byte) bool {
 
 // GetEntity returns DataEntity bind to given key
 func (db *DB) GetEntity(key string) (*database.DataEntity, bool) {
-	raw, ok := db.data.GetWithLock(key)
+	entity, ok := db.data.GetWithLock(key)
 	if !ok {
 		return nil, false
 	}
 	if db.IsExpired(key) {
 		return nil, false
 	}
-	entity, _ := raw.(*database.DataEntity)
 	return entity, true
 }
 
@@ -194,14 +193,13 @@ func (db *DB) PutIfAbsent(key string, entity *database.DataEntity) int {
 
 // Remove the given key from db
 func (db *DB) Remove(key string) {
-	raw, deleted := db.data.RemoveWithLock(key)
+	entity, deleted := db.data.RemoveWithLock(key)
 	db.ttlMap.Remove(key)
 	taskKey := genExpireTask(key)
 	timewheel.Cancel(taskKey)
 	if cb := db.deleteCallback; cb != nil {
-		var entity *database.DataEntity
-		if deleted > 0 {
-			entity = raw.(*database.DataEntity)
+		if deleted == 0 {
+			entity = nil
 		}
 		cb(db.index, key, entity)
 	}
@@ -256,11 +254,10 @@ func (db *DB) Expire(key string, expireTime time.Time) {
 		defer db.RWUnLocks(keys, nil)
 		// check-lock-check, ttl may be updated during waiting lock
 		logger.Info("expire " + key)
-		rawExpireTime, ok := db.ttlMap.Get(key)
+		expireTime, ok := db.ttlMap.Get(key)
 		if !ok {
 			return
 		}
-		expireTime, _ := rawExpireTime.(time.Time)
 		expired := time.Now().After(expireTime)
 		if expired {
 			db.Remove(key)
@@ -277,11 +274,10 @@ func (db *DB) Persist(key string) {
 
 // IsExpired check whether a key is expired
 func (db *DB) IsExpired(key string) bool {
-	rawExpireTime, ok := db.ttlMap.Get(key)
+	expireTime, ok := db.ttlMap.Get(key)
 	if !ok {
 		return false
 	}
-	expireTime, _ := rawExpireTime.(time.Time)
 	expired := time.Now().After(expireTime)
 	if expired {
 		db.Remove(key)
@@ -300,21 +296,19 @@ func (db *DB) addVersion(keys ...string) {
 
 // GetVersion returns version code for given key
 func (db *DB) GetVersion(key string) uint32 {
-	entity, ok := db.versionMap.Get(key)
+	versionCode, ok := db.versionMap.Get(key)
 	if !ok {
 		return 0
 	}
-	return entity.(uint32)
+	return versionCode
 }
 
 // ForEach traverses all the keys in the database
 func (db *DB) ForEach(cb func(key string, data *database.DataEntity, expiration *time.Time) bool) {
-	db.data.ForEach(func(key string, raw interface{}) bool {
-		entity, _ := raw.(*database.DataEntity)
+	db.data.ForEach(func(key string, entity *database.DataEntity) bool {
 		var expiration *time.Time
-		rawExpireTime, ok := db.ttlMap.Get(key)
+		expireTime, ok := db.ttlMap.Get(key)
 		if ok {
-			expireTime, _ := rawExpireTime.(time.Time)
 			expiration = &expireTime
 		}
 

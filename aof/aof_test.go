@@ -330,7 +330,7 @@ func TestEntityToCmdSet(t *testing.T) {
 }
 
 func TestEntityToCmdHash(t *testing.T) {
-	h := dict.MakeSimple()
+	h := dict.MakeSimple[[]byte]()
 	h.Put("field", []byte("value"))
 	c := EntityToCmd("key", &dbiface.DataEntity{Data: h})
 	if !strings.Contains(string(c.ToBytes()), "HMSET") {

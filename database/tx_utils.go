@@ -80,9 +80,8 @@ func rollbackHashFields(db *DB, key string, fields ...string) []CmdLine {
 				utils.ToCmdLine("HDEL", key, field),
 			)
 		} else {
-			value, _ := entity.([]byte)
 			undoCmdLines = append(undoCmdLines,
-				utils.ToCmdLine("HSET", key, field, string(value)),
+				utils.ToCmdLine("HSET", key, field, string(entity)),
 			)
 		}
 	}

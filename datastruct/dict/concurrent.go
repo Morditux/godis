@@ -11,14 +11,14 @@ import (
 )
 
 // ConcurrentDict is thread safe map using sharding lock
-type ConcurrentDict struct {
-	table      []*shard
+type ConcurrentDict[V any] struct {
+	table      []*shard[V]
 	count      int32
 	shardCount int
 }
 
-type shard struct {
-	m     map[string]interface{}
+type shard[V any] struct {
+	m     map[string]V
 	mutex sync.RWMutex
 }
 
@@ -39,27 +39,27 @@ func computeCapacity(param int) (size int) {
 }
 
 // MakeConcurrent creates ConcurrentDict with the given shard count
-func MakeConcurrent(shardCount int) *ConcurrentDict {
+func MakeConcurrent[V any](shardCount int) *ConcurrentDict[V] {
 	if shardCount == 1 {
-		table := []*shard{
+		table := []*shard[V]{
 			{
-				m: make(map[string]interface{}),
+				m: make(map[string]V),
 			},
 		}
-		return &ConcurrentDict{
+		return &ConcurrentDict[V]{
 			count:      0,
 			table:      table,
 			shardCount: shardCount,
 		}
 	}
 	shardCount = computeCapacity(shardCount)
-	table := make([]*shard, shardCount)
+	table := make([]*shard[V], shardCount)
 	for i := 0; i < shardCount; i++ {
-		table[i] = &shard{
-			m: make(map[string]interface{}),
+		table[i] = &shard[V]{
+			m: make(map[string]V),
 		}
 	}
-	d := &ConcurrentDict{
+	d := &ConcurrentDict[V]{
 		count:      0,
 		table:      table,
 		shardCount: shardCount,
@@ -78,7 +78,7 @@ func fnv32(key string) uint32 {
 	return hash
 }
 
-func (dict *ConcurrentDict) spread(key string) uint32 {
+func (dict *ConcurrentDict[V]) spread(key string) uint32 {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -90,7 +90,7 @@ func (dict *ConcurrentDict) spread(key string) uint32 {
 	return (tableSize - 1) & hashCode
 }
 
-func (dict *ConcurrentDict) getShard(index uint32) *shard {
+func (dict *ConcurrentDict[V]) getShard(index uint32) *shard[V] {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -98,38 +98,41 @@ func (dict *ConcurrentDict) getShard(index uint32) *shard {
 }
 
 // Get returns the binding value and whether the key is exist
-func (dict *ConcurrentDict) Get(key string) (val interface{}, exists bool) {
+func (dict *ConcurrentDict[V]) Get(key string) (val V, exists bool) {
 	if dict == nil {
 		panic("dict is nil")
 	}
 	index := dict.spread(key)
 	s := dict.getShard(index)
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
 	val, exists = s.m[key]
 	return
 }
 
-func (dict *ConcurrentDict) GetWithLock(key string) (val interface{}, exists bool) {
+func (dict *ConcurrentDict[V]) GetWithLock(key string) (val V, exists bool) {
 	if dict == nil {
 		panic("dict is nil")
 	}
+	/* see PutWithLock */
 	index := dict.spread(key)
 	s := dict.getShard(index)
+
 	val, exists = s.m[key]
 	return
 }
 
 // Len returns the number of dict
-func (dict *ConcurrentDict) Len() int {
+func (dict *ConcurrentDict[V]) Len() int {
 	if dict == nil {
 		panic("dict is nil")
 	}
 	return int(atomic.LoadInt32(&dict.count))
 }
 
-// Put puts key value into dict and returns the number of new inserted key-value
-func (dict *ConcurrentDict) Put(key string, val interface{}) (result int) {
+// Put puts key value into dict and returns the number of new inserted key-value pair
+func (dict *ConcurrentDict[V]) Put(key string, val V) (result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -138,33 +141,43 @@ func (dict *ConcurrentDict) Put(key string, val interface{}) (result int) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	if _, ok := s.m[key]; ok {
+	if _, ok := s.m[key]; ok { // update
 		s.m[key] = val
 		return 0
 	}
-	dict.addCount()
 	s.m[key] = val
+	dict.addCount()
 	return 1
 }
 
-func (dict *ConcurrentDict) PutWithLock(key string, val interface{}) (result int) {
+// PutWithLock puts with the assuming that the lock key is lock by the invoker
+func (dict *ConcurrentDict[V]) PutWithLock(key string, val V) (result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
+	/* it is not a strict concurrent safety, depends on the invoker's locking strategy
+	two invoker can put different hash of key at the same time
+	but the invoker who holds the lock of the key will check whether related keys was changed, then put
+	if one invoker put the key, the other put will do duplicated insert, then cause count upset
+	so the optimistic approach is, check first, if not exists, not to put and return 0, the invoker should
+	retry after a while */
 	index := dict.spread(key)
 	s := dict.getShard(index)
 
-	if _, ok := s.m[key]; ok {
+	/* no multiple inserts:
+	if the field was not exists, err: can't put the related value into result
+	if the field was updated by another invoker, may cause unpredictable behavior */
+	if _, ok := s.m[key]; ok { // update
 		s.m[key] = val
 		return 0
 	}
-	dict.addCount()
 	s.m[key] = val
+	dict.addCount()
 	return 1
 }
 
 // PutIfAbsent puts value if the key is not exists and returns the number of updated key-value
-func (dict *ConcurrentDict) PutIfAbsent(key string, val interface{}) (result int) {
+func (dict *ConcurrentDict[V]) PutIfAbsent(key string, val V) (result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -181,7 +194,7 @@ func (dict *ConcurrentDict) PutIfAbsent(key string, val interface{}) (result int
 	return 1
 }
 
-func (dict *ConcurrentDict) PutIfAbsentWithLock(key string, val interface{}) (result int) {
+func (dict *ConcurrentDict[V]) PutIfAbsentWithLock(key string, val V) (result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -197,7 +210,7 @@ func (dict *ConcurrentDict) PutIfAbsentWithLock(key string, val interface{}) (re
 }
 
 // PutIfExists puts value if the key is existed and returns the number of inserted key-value
-func (dict *ConcurrentDict) PutIfExists(key string, val interface{}) (result int) {
+func (dict *ConcurrentDict[V]) PutIfExists(key string, val V) (result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -213,7 +226,7 @@ func (dict *ConcurrentDict) PutIfExists(key string, val interface{}) (result int
 	return 0
 }
 
-func (dict *ConcurrentDict) PutIfExistsWithLock(key string, val interface{}) (result int) {
+func (dict *ConcurrentDict[V]) PutIfExistsWithLock(key string, val V) (result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -228,7 +241,7 @@ func (dict *ConcurrentDict) PutIfExistsWithLock(key string, val interface{}) (re
 }
 
 // Remove removes the key and return the number of deleted key-value
-func (dict *ConcurrentDict) Remove(key string) (val interface{}, result int) {
+func (dict *ConcurrentDict[V]) Remove(key string) (val V, result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -242,10 +255,10 @@ func (dict *ConcurrentDict) Remove(key string) (val interface{}, result int) {
 		dict.decreaseCount()
 		return val, 1
 	}
-	return nil, 0
+	return val, 0
 }
 
-func (dict *ConcurrentDict) RemoveWithLock(key string) (val interface{}, result int) {
+func (dict *ConcurrentDict[V]) RemoveWithLock(key string) (val V, result int) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -260,17 +273,17 @@ func (dict *ConcurrentDict) RemoveWithLock(key string) (val interface{}, result 
 	return val, 0
 }
 
-func (dict *ConcurrentDict) addCount() int32 {
+func (dict *ConcurrentDict[V]) addCount() int32 {
 	return atomic.AddInt32(&dict.count, 1)
 }
 
-func (dict *ConcurrentDict) decreaseCount() int32 {
+func (dict *ConcurrentDict[V]) decreaseCount() int32 {
 	return atomic.AddInt32(&dict.count, -1)
 }
 
 // ForEach traversal the dict
 // it may not visit new entry inserted during traversal
-func (dict *ConcurrentDict) ForEach(consumer Consumer) {
+func (dict *ConcurrentDict[V]) ForEach(consumer Consumer[V]) {
 	if dict == nil {
 		panic("dict is nil")
 	}
@@ -294,10 +307,10 @@ func (dict *ConcurrentDict) ForEach(consumer Consumer) {
 }
 
 // Keys returns all keys in dict
-func (dict *ConcurrentDict) Keys() []string {
+func (dict *ConcurrentDict[V]) Keys() []string {
 	keys := make([]string, dict.Len())
 	i := 0
-	dict.ForEach(func(key string, val interface{}) bool {
+	dict.ForEach(func(key string, val V) bool {
 		if i < len(keys) {
 			keys[i] = key
 			i++
@@ -310,7 +323,7 @@ func (dict *ConcurrentDict) Keys() []string {
 }
 
 // RandomKey returns a key randomly
-func (shard *shard) RandomKey() string {
+func (shard *shard[V]) RandomKey() string {
 	if shard == nil {
 		panic("shard is nil")
 	}
@@ -324,7 +337,7 @@ func (shard *shard) RandomKey() string {
 }
 
 // RandomKeys randomly returns keys of the given number, may contain duplicated key
-func (dict *ConcurrentDict) RandomKeys(limit int) []string {
+func (dict *ConcurrentDict[V]) RandomKeys(limit int) []string {
 	size := dict.Len()
 	if limit >= size {
 		return dict.Keys()
@@ -348,7 +361,7 @@ func (dict *ConcurrentDict) RandomKeys(limit int) []string {
 }
 
 // RandomDistinctKeys randomly returns keys of the given number, won't contain duplicated key
-func (dict *ConcurrentDict) RandomDistinctKeys(limit int) []string {
+func (dict *ConcurrentDict[V]) RandomDistinctKeys(limit int) []string {
 	size := dict.Len()
 	if limit >= size {
 		return dict.Keys()
@@ -380,11 +393,11 @@ func (dict *ConcurrentDict) RandomDistinctKeys(limit int) []string {
 }
 
 // Clear removes all keys in dict
-func (dict *ConcurrentDict) Clear() {
-	*dict = *MakeConcurrent(dict.shardCount)
+func (dict *ConcurrentDict[V]) Clear() {
+	*dict = *MakeConcurrent[V](dict.shardCount)
 }
 
-func (dict *ConcurrentDict) toLockIndices(keys []string, reverse bool) []uint32 {
+func (dict *ConcurrentDict[V]) toLockIndices(keys []string, reverse bool) []uint32 {
 	indexMap := make(map[uint32]struct{})
 	for _, key := range keys {
 		index := dict.spread(key)
@@ -404,7 +417,7 @@ func (dict *ConcurrentDict) toLockIndices(keys []string, reverse bool) []uint32 
 }
 
 // RWLocks locks write keys and read keys together. allow duplicate keys
-func (dict *ConcurrentDict) RWLocks(writeKeys []string, readKeys []string) {
+func (dict *ConcurrentDict[V]) RWLocks(writeKeys []string, readKeys []string) {
 	keys := append(writeKeys, readKeys...)
 	indices := dict.toLockIndices(keys, false)
 	writeIndexSet := make(map[uint32]struct{})
@@ -424,7 +437,7 @@ func (dict *ConcurrentDict) RWLocks(writeKeys []string, readKeys []string) {
 }
 
 // RWUnLocks unlocks write keys and read keys together. allow duplicate keys
-func (dict *ConcurrentDict) RWUnLocks(writeKeys []string, readKeys []string) {
+func (dict *ConcurrentDict[V]) RWUnLocks(writeKeys []string, readKeys []string) {
 	keys := append(writeKeys, readKeys...)
 	indices := dict.toLockIndices(keys, true)
 	writeIndexSet := make(map[uint32]struct{})
@@ -451,7 +464,9 @@ func stringsToBytes(strSlice []string) [][]byte {
 	return byteSlice
 }
 
-func (dict *ConcurrentDict) DictScan(cursor int, count int, pattern string) ([][]byte, int) {
+// DictScan scans the dict keys matching the pattern, values are not included.
+// cursor is the shard index to continue from; 0 means the scan is completed
+func (dict *ConcurrentDict[V]) DictScan(cursor int, count int, pattern string) ([][]byte, int) {
 	size := dict.Len()
 	result := make([][]byte, 0)
 

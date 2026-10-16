@@ -162,11 +162,10 @@ func (persister *Persister) generateRDB(ctx *RewriteCtx) error {
 					return true
 				})
 				err = encoder.WriteSetObject(key, vals, opts...)
-			case dict.Dict:
+			case dict.Dict[[]byte]:
 				hash := make(map[string][]byte)
-				obj.ForEach(func(key string, val interface{}) bool {
-					bytes, _ := val.([]byte)
-					hash[key] = bytes
+				obj.ForEach(func(key string, val []byte) bool {
+					hash[key] = val
 					return true
 				})
 				err = encoder.WriteHashMapObject(key, hash, opts...)

@@ -29,11 +29,8 @@ func subscribe0(hub *Hub, channel string, client redis.Connection) bool {
 	client.Subscribe(channel)
 
 	// add into hub.subs
-	raw, ok := hub.subs.Get(channel)
-	var subscribers *list.LinkedList
-	if ok {
-		subscribers, _ = raw.(*list.LinkedList)
-	} else {
+	subscribers, ok := hub.subs.Get(channel)
+	if !ok {
 		subscribers = list.Make()
 		hub.subs.Put(channel, subscribers)
 	}
@@ -54,9 +51,8 @@ func unsubscribe0(hub *Hub, channel string, client redis.Connection) bool {
 	client.UnSubscribe(channel)
 
 	// remove from hub.subs
-	raw, ok := hub.subs.Get(channel)
+	subscribers, ok := hub.subs.Get(channel)
 	if ok {
-		subscribers, _ := raw.(*list.LinkedList)
 		subscribers.RemoveAllByVal(func(a interface{}) bool {
 			return utils.Equals(a, client)
 		})
@@ -140,11 +136,10 @@ func Publish(hub *Hub, args [][]byte) redis.Reply {
 	hub.subsLocker.Lock(channel)
 	defer hub.subsLocker.UnLock(channel)
 
-	raw, ok := hub.subs.Get(channel)
+	subscribers, ok := hub.subs.Get(channel)
 	if !ok {
 		return protocol.MakeIntReply(0)
 	}
-	subscribers, _ := raw.(*list.LinkedList)
 	subscribers.ForEach(func(i int, c interface{}) bool {
 		client, _ := c.(redis.Connection)
 		replyArgs := make([][]byte, 3)

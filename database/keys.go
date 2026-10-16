@@ -6,6 +6,7 @@ import (
 	"github.com/hdt3213/godis/datastruct/list"
 	"github.com/hdt3213/godis/datastruct/set"
 	"github.com/hdt3213/godis/datastruct/sortedset"
+	"github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/lib/utils"
 	"github.com/hdt3213/godis/lib/wildcard"
@@ -70,7 +71,7 @@ func getType(db *DB, key string) string {
 		return "string"
 	case list.List:
 		return "list"
-	case dict.Dict:
+	case dict.Dict[[]byte]:
 		return "hash"
 	case *set.Set:
 		return "set"
@@ -115,8 +116,7 @@ func execRename(db *DB, args [][]byte) redis.Reply {
 	if hasTTL {
 		db.Persist(src) // clean src and dest with their ttl
 		db.Persist(dest)
-		expireTime, _ := rawTTL.(time.Time)
-		db.Expire(dest, expireTime)
+		db.Expire(dest, rawTTL)
 	}
 	db.addAof(utils.ToCmdLine3("rename", args...))
 	return &protocol.OkReply{}
@@ -148,8 +148,7 @@ func execRenameNx(db *DB, args [][]byte) redis.Reply {
 	if hasTTL {
 		db.Persist(src) // clean src and dest with their ttl
 		db.Persist(dest)
-		expireTime, _ := rawTTL.(time.Time)
-		db.Expire(dest, expireTime)
+		db.Expire(dest, rawTTL)
 	}
 	db.addAof(utils.ToCmdLine3("renamenx", args...))
 	return protocol.MakeIntReply(1)
@@ -208,9 +207,7 @@ func execExpireTime(db *DB, args [][]byte) redis.Reply {
 	if !exists {
 		return protocol.MakeIntReply(-1)
 	}
-	rawExpireTime, _ := raw.(time.Time)
-	expireTime := rawExpireTime.Unix()
-	return protocol.MakeIntReply(expireTime)
+	return protocol.MakeIntReply(raw.Unix())
 }
 
 // execPExpire sets a key's time to live in milliseconds
@@ -267,9 +264,7 @@ func execPExpireTime(db *DB, args [][]byte) redis.Reply {
 	if !exists {
 		return protocol.MakeIntReply(-1)
 	}
-	rawExpireTime, _ := raw.(time.Time)
-	expireTime := rawExpireTime.UnixMilli()
-	return protocol.MakeIntReply(expireTime)
+	return protocol.MakeIntReply(raw.UnixMilli())
 }
 
 // execTTL returns a key's time to live in seconds
@@ -284,8 +279,7 @@ func execTTL(db *DB, args [][]byte) redis.Reply {
 	if !exists {
 		return protocol.MakeIntReply(-1)
 	}
-	expireTime, _ := raw.(time.Time)
-	ttl := expireTime.Sub(time.Now()).Seconds()
+	ttl := raw.Sub(time.Now()).Seconds()
 	return protocol.MakeIntReply(int64(math.Round(ttl)))
 }
 
@@ -301,8 +295,7 @@ func execPTTL(db *DB, args [][]byte) redis.Reply {
 	if !exists {
 		return protocol.MakeIntReply(-1)
 	}
-	expireTime, _ := raw.(time.Time)
-	ttl := expireTime.Sub(time.Now()).Milliseconds()
+	ttl := raw.Sub(time.Now()).Milliseconds()
 	return protocol.MakeIntReply(int64(math.Round(float64(ttl))))
 }
 
@@ -331,7 +324,7 @@ func execKeys(db *DB, args [][]byte) redis.Reply {
 		return protocol.MakeErrReply("ERR illegal wildcard")
 	}
 	result := make([][]byte, 0)
-	db.data.ForEach(func(key string, val interface{}) bool {
+	db.data.ForEach(func(key string, val *database.DataEntity) bool {
 		if !pattern.IsMatch(key) {
 			return true
 		}
@@ -349,8 +342,7 @@ func toTTLCmd(db *DB, key string) *protocol.MultiBulkReply {
 		// has no TTL
 		return protocol.MakeMultiBulkReply(utils.ToCmdLine("PERSIST", key))
 	}
-	expireTime, _ := raw.(time.Time)
-	timestamp := strconv.FormatInt(expireTime.UnixNano()/1000/1000, 10)
+	timestamp := strconv.FormatInt(raw.UnixNano()/1000/1000, 10)
 	return protocol.MakeMultiBulkReply(utils.ToCmdLine("PEXPIREAT", key, timestamp))
 }
 
@@ -416,8 +408,7 @@ func execCopy(mdb *Server, conn redis.Connection, args [][]byte) redis.Reply {
 	destDB.PutEntity(destKey, src)
 	raw, exists := db.ttlMap.Get(srcKey)
 	if exists {
-		expire := raw.(time.Time)
-		destDB.Expire(destKey, expire)
+		destDB.Expire(destKey, raw)
 	}
 	mdb.AddAof(conn.GetDBIndex(), utils.ToCmdLine3("copy", args...))
 	return protocol.MakeIntReply(1)

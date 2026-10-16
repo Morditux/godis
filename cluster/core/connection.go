@@ -37,7 +37,7 @@ type peerStream interface {
 }
 
 type defaultClientFactory struct {
-	nodeConnections dict.Dict // map[string]*pool.Pool
+	nodeConnections dict.Dict[*pool.Pool] // map[string]*pool.Pool
 	// createMu serializes pool creation: BorrowPeerClient checks-then-acts
 	// on nodeConnections, so two borrows of the same peer could each create
 	// a pool, with the loser and its clients leaking
@@ -51,7 +51,7 @@ var connectionPoolConfig = pool.Config{
 
 func NewFactory() ConnectionFactory {
 	return &defaultClientFactory{
-		nodeConnections: dict.MakeConcurrent(1),
+		nodeConnections: dict.MakeConcurrent[*pool.Pool](1),
 	}
 }
 
@@ -77,8 +77,7 @@ func (factory *defaultClientFactory) BorrowPeerClient(peerAddr string) (peerClie
 	// hold createMu around creation to keep the check-then-act atomic;
 	// the fast path (pool exists) only takes it briefly
 	factory.createMu.Lock()
-	raw, ok := factory.nodeConnections.Get(peerAddr)
-	var connectionPool *pool.Pool
+	connectionPool, ok := factory.nodeConnections.Get(peerAddr)
 	if !ok {
 		creator := func() (interface{}, error) {
 			return factory.NewPeerClient(peerAddr)
@@ -95,8 +94,6 @@ func (factory *defaultClientFactory) BorrowPeerClient(peerAddr string) (peerClie
 		}
 		connectionPool = pool.New(creator, finalizer, connectionPoolConfig)
 		factory.nodeConnections.Put(peerAddr, connectionPool)
-	} else {
-		connectionPool = raw.(*pool.Pool)
 	}
 	factory.createMu.Unlock()
 	raw, err := connectionPool.Get()
@@ -117,11 +114,11 @@ func (cluster *Cluster) BorrowLeaderClient() (peerClient, error) {
 
 // ReturnPeerClient returns client to pool
 func (factory *defaultClientFactory) ReturnPeerClient(peerClient peerClient) error {
-	raw, ok := factory.nodeConnections.Get(peerClient.RemoteAddress())
+	connectionPool, ok := factory.nodeConnections.Get(peerClient.RemoteAddress())
 	if !ok {
 		return errors.New("connection pool not found")
 	}
-	raw.(*pool.Pool).Put(peerClient)
+	connectionPool.Put(peerClient)
 	return nil
 }
 
@@ -176,13 +173,13 @@ func (factory *defaultClientFactory) NewStream(peerAddr string, cmdLine CmdLine)
 
 func newDefaultClientFactory() *defaultClientFactory {
 	return &defaultClientFactory{
-		nodeConnections: dict.MakeConcurrent(1),
+		nodeConnections: dict.MakeConcurrent[*pool.Pool](1),
 	}
 }
 
 func (factory *defaultClientFactory) Close() error {
-	factory.nodeConnections.ForEach(func(key string, val interface{}) bool {
-		val.(*pool.Pool).Close()
+	factory.nodeConnections.ForEach(func(key string, val *pool.Pool) bool {
+		val.Close()
 		return true
 	})
 	return nil

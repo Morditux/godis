@@ -25,7 +25,7 @@ func EntityToCmd(key string, entity *database.DataEntity) *protocol.MultiBulkRep
 		cmd = listToCmd(key, val)
 	case *set.Set:
 		cmd = setToCmd(key, val)
-	case dict.Dict:
+	case dict.Dict[[]byte]:
 		cmd = hashToCmd(key, val)
 	case *SortedSet.SortedSet:
 		cmd = zSetToCmd(key, val)
@@ -74,15 +74,14 @@ func setToCmd(key string, set *set.Set) *protocol.MultiBulkReply {
 
 var hMSetCmd = []byte("HMSET")
 
-func hashToCmd(key string, hash dict.Dict) *protocol.MultiBulkReply {
+func hashToCmd(key string, hash dict.Dict[[]byte]) *protocol.MultiBulkReply {
 	args := make([][]byte, 2+hash.Len()*2)
 	args[0] = hMSetCmd
 	args[1] = []byte(key)
 	i := 0
-	hash.ForEach(func(field string, val interface{}) bool {
-		bytes, _ := val.([]byte)
+	hash.ForEach(func(field string, val []byte) bool {
 		args[2+i*2] = []byte(field)
-		args[3+i*2] = bytes
+		args[3+i*2] = val
 		i++
 		return true
 	})

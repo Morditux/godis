@@ -5,25 +5,25 @@ import (
 )
 
 // SimpleDict wraps a map, it is not thread safe
-type SimpleDict struct {
-	m map[string]interface{}
+type SimpleDict[V any] struct {
+	m map[string]V
 }
 
 // MakeSimple makes a new map
-func MakeSimple() *SimpleDict {
-	return &SimpleDict{
-		m: make(map[string]interface{}),
+func MakeSimple[V any]() *SimpleDict[V] {
+	return &SimpleDict[V]{
+		m: make(map[string]V),
 	}
 }
 
 // Get returns the binding value and whether the key is exist
-func (dict *SimpleDict) Get(key string) (val interface{}, exists bool) {
+func (dict *SimpleDict[V]) Get(key string) (val V, exists bool) {
 	val, ok := dict.m[key]
 	return val, ok
 }
 
 // Len returns the number of dict
-func (dict *SimpleDict) Len() int {
+func (dict *SimpleDict[V]) Len() int {
 	if dict.m == nil {
 		panic("m is nil")
 	}
@@ -31,7 +31,7 @@ func (dict *SimpleDict) Len() int {
 }
 
 // Put puts key value into dict and returns the number of new inserted key-value
-func (dict *SimpleDict) Put(key string, val interface{}) (result int) {
+func (dict *SimpleDict[V]) Put(key string, val V) (result int) {
 	_, existed := dict.m[key]
 	dict.m[key] = val
 	if existed {
@@ -41,7 +41,7 @@ func (dict *SimpleDict) Put(key string, val interface{}) (result int) {
 }
 
 // PutIfAbsent puts value if the key is not exists and returns the number of updated key-value
-func (dict *SimpleDict) PutIfAbsent(key string, val interface{}) (result int) {
+func (dict *SimpleDict[V]) PutIfAbsent(key string, val V) (result int) {
 	_, existed := dict.m[key]
 	if existed {
 		return 0
@@ -50,28 +50,28 @@ func (dict *SimpleDict) PutIfAbsent(key string, val interface{}) (result int) {
 	return 1
 }
 
-// PutIfExists puts value if the key is existed and returns the number of inserted key-value
-func (dict *SimpleDict) PutIfExists(key string, val interface{}) (result int) {
+// PutIfExists puts value if the key exists and returns the number of inserted key-value
+func (dict *SimpleDict[V]) PutIfExists(key string, val V) (result int) {
 	_, existed := dict.m[key]
-	if existed {
-		dict.m[key] = val
-		return 1
+	if !existed {
+		return 0
 	}
-	return 0
+	dict.m[key] = val
+	return 1
 }
 
 // Remove removes the key and return the number of deleted key-value
-func (dict *SimpleDict) Remove(key string) (val interface{}, result int) {
+func (dict *SimpleDict[V]) Remove(key string) (val V, result int) {
 	val, existed := dict.m[key]
-	delete(dict.m, key)
 	if existed {
+		delete(dict.m, key)
 		return val, 1
 	}
-	return nil, 0
+	return val, 0
 }
 
-// Keys returns all keys in dict
-func (dict *SimpleDict) Keys() []string {
+// Keys returns all the keys in the dict
+func (dict *SimpleDict[V]) Keys() []string {
 	result := make([]string, len(dict.m))
 	i := 0
 	for k := range dict.m {
@@ -82,7 +82,7 @@ func (dict *SimpleDict) Keys() []string {
 }
 
 // ForEach traversal the dict
-func (dict *SimpleDict) ForEach(consumer Consumer) {
+func (dict *SimpleDict[V]) ForEach(consumer Consumer[V]) {
 	for k, v := range dict.m {
 		if !consumer(k, v) {
 			break
@@ -91,7 +91,7 @@ func (dict *SimpleDict) ForEach(consumer Consumer) {
 }
 
 // RandomKeys randomly returns keys of the given number, may contain duplicated key
-func (dict *SimpleDict) RandomKeys(limit int) []string {
+func (dict *SimpleDict[V]) RandomKeys(limit int) []string {
 	result := make([]string, limit)
 	for i := 0; i < limit; i++ {
 		for k := range dict.m {
@@ -103,7 +103,7 @@ func (dict *SimpleDict) RandomKeys(limit int) []string {
 }
 
 // RandomDistinctKeys randomly returns keys of the given number, won't contain duplicated key
-func (dict *SimpleDict) RandomDistinctKeys(limit int) []string {
+func (dict *SimpleDict[V]) RandomDistinctKeys(limit int) []string {
 	size := limit
 	if size > len(dict.m) {
 		size = len(dict.m)
@@ -121,11 +121,13 @@ func (dict *SimpleDict) RandomDistinctKeys(limit int) []string {
 }
 
 // Clear removes all keys in dict
-func (dict *SimpleDict) Clear() {
-	*dict = *MakeSimple()
+func (dict *SimpleDict[V]) Clear() {
+	*dict = *MakeSimple[V]()
 }
 
-func (dict *SimpleDict) DictScan(cursor int, count int, pattern string) ([][]byte, int) {
+// DictScan traverses the whole dict (SimpleDict has no cursor concept) and
+// returns the keys matching the pattern; values are not included
+func (dict *SimpleDict[V]) DictScan(cursor int, count int, pattern string) ([][]byte, int) {
 	result := make([][]byte, 0)
 	matchKey, err := wildcard.CompilePattern(pattern)
 	if err != nil {
@@ -133,12 +135,7 @@ func (dict *SimpleDict) DictScan(cursor int, count int, pattern string) ([][]byt
 	}
 	for k := range dict.m {
 		if pattern == "*" || matchKey.IsMatch(k) {
-			raw, exists := dict.Get(k)
-			if !exists {
-				continue
-			}
 			result = append(result, []byte(k))
-			result = append(result, raw.([]byte))
 		}
 	}
 	return result, 0
