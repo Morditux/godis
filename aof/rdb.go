@@ -147,11 +147,10 @@ func (persister *Persister) generateRDB(ctx *RewriteCtx) error {
 			switch obj := entity.Data.(type) {
 			case []byte:
 				err = encoder.WriteStringObject(key, obj, opts...)
-			case List.List:
+			case List.List[[]byte]:
 				vals := make([][]byte, 0, obj.Len())
-				obj.ForEach(func(i int, v interface{}) bool {
-					bytes, _ := v.([]byte)
-					vals = append(vals, bytes)
+				obj.ForEach(func(i int, v []byte) bool {
+					vals = append(vals, v)
 					return true
 				})
 				err = encoder.WriteListObject(key, vals, opts...)

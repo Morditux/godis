@@ -21,7 +21,7 @@ func EntityToCmd(key string, entity *database.DataEntity) *protocol.MultiBulkRep
 	switch val := entity.Data.(type) {
 	case []byte:
 		cmd = stringToCmd(key, val)
-	case List.List:
+	case List.List[[]byte]:
 		cmd = listToCmd(key, val)
 	case *set.Set:
 		cmd = setToCmd(key, val)
@@ -45,13 +45,12 @@ func stringToCmd(key string, bytes []byte) *protocol.MultiBulkReply {
 
 var rPushAllCmd = []byte("RPUSH")
 
-func listToCmd(key string, list List.List) *protocol.MultiBulkReply {
+func listToCmd(key string, list List.List[[]byte]) *protocol.MultiBulkReply {
 	args := make([][]byte, 2+list.Len())
 	args[0] = rPushAllCmd
 	args[1] = []byte(key)
-	list.ForEach(func(i int, val interface{}) bool {
-		bytes, _ := val.([]byte)
-		args[2+i] = bytes
+	list.ForEach(func(i int, val []byte) bool {
+		args[2+i] = val
 		return true
 	})
 	return protocol.MakeMultiBulkReply(args)

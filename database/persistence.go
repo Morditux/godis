@@ -46,7 +46,7 @@ func (server *Server) LoadRDB(dec *core.Decoder) error {
 			}
 		case rdb.ListType:
 			listObj := o.(*rdb.ListObject)
-			list := List.NewQuickList()
+			list := List.NewQuickList[[]byte]()
 			for _, v := range listObj.Values {
 				list.Add(v)
 			}

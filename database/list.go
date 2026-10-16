@@ -12,26 +12,26 @@ import (
 	"github.com/hdt3213/godis/redis/protocol"
 )
 
-func (db *DB) getAsList(key string) (List.List, protocol.ErrorReply) {
+func (db *DB) getAsList(key string) (List.List[[]byte], protocol.ErrorReply) {
 	entity, ok := db.GetEntity(key)
 	if !ok {
 		return nil, nil
 	}
-	list, ok := entity.Data.(List.List)
+	list, ok := entity.Data.(List.List[[]byte])
 	if !ok {
 		return nil, &protocol.WrongTypeErrReply{}
 	}
 	return list, nil
 }
 
-func (db *DB) getOrInitList(key string) (list List.List, isNew bool, errReply protocol.ErrorReply) {
+func (db *DB) getOrInitList(key string) (list List.List[[]byte], isNew bool, errReply protocol.ErrorReply) {
 	list, errReply = db.getAsList(key)
 	if errReply != nil {
 		return nil, false, errReply
 	}
 	isNew = false
 	if list == nil {
-		list = List.NewQuickList()
+		list = List.NewQuickList[[]byte]()
 		db.PutEntity(key, &database.DataEntity{
 			Data: list,
 		})
@@ -68,7 +68,7 @@ func execLIndex(db *DB, args [][]byte) redis.Reply {
 		return &protocol.NullBulkReply{}
 	}
 
-	val, _ := list.Get(index).([]byte)
+	val := list.Get(index)
 	return protocol.MakeBulkReply(val)
 }
 
@@ -114,7 +114,7 @@ func execLPop(db *DB, args [][]byte) redis.Reply {
 		}
 		vals := make([][]byte, count)
 		for i := 0; i < count; i++ {
-			val := list.Remove(0).([]byte)
+			val := list.Remove(0)
 			vals[i] = val
 		}
 		if list.Len() == 0 {
@@ -124,7 +124,7 @@ func execLPop(db *DB, args [][]byte) redis.Reply {
 		return protocol.MakeMultiBulkReply(vals)
 	}
 
-	val, _ := list.Remove(0).([]byte)
+	val := list.Remove(0)
 	if list.Len() == 0 {
 		db.Remove(key)
 	}
@@ -155,13 +155,13 @@ func undoLPop(db *DB, args [][]byte) []CmdLine {
 		elements := make([][]byte, count)
 		vals := list.Range(0, count)
 		for i := 0; i < count; i++ {
-			elements[count-i-1] = vals[i].([]byte)
+			elements[count-i-1] = vals[i]
 		}
 		cmd := CmdLine{lPushCmd, args[0]}
 		cmd = append(cmd, elements...)
 		return []CmdLine{cmd}
 	}
-	element, _ := list.Get(0).([]byte)
+	element := list.Get(0)
 	return []CmdLine{
 		{
 			lPushCmd,
@@ -273,7 +273,7 @@ func execLRange(db *DB, args [][]byte) redis.Reply {
 	slice := list.Range(start, stop)
 	result := make([][]byte, len(slice))
 	for i, raw := range slice {
-		bytes, _ := raw.([]byte)
+		bytes := raw
 		result[i] = bytes
 	}
 	return protocol.MakeMultiBulkReply(result)
@@ -301,15 +301,15 @@ func execLRem(db *DB, args [][]byte) redis.Reply {
 
 	var removed int
 	if count == 0 {
-		removed = list.RemoveAllByVal(func(a interface{}) bool {
+		removed = list.RemoveAllByVal(func(a []byte) bool {
 			return utils.Equals(a, value)
 		})
 	} else if count > 0 {
-		removed = list.RemoveByVal(func(a interface{}) bool {
+		removed = list.RemoveByVal(func(a []byte) bool {
 			return utils.Equals(a, value)
 		}, count)
 	} else {
-		removed = list.ReverseRemoveByVal(func(a interface{}) bool {
+		removed = list.ReverseRemoveByVal(func(a []byte) bool {
 			return utils.Equals(a, value)
 		}, -count)
 	}
@@ -380,7 +380,7 @@ func undoLSet(db *DB, args [][]byte) []CmdLine {
 	} else if index >= size {
 		return nil
 	}
-	value, _ := list.Get(index).([]byte)
+	value := list.Get(index)
 	return []CmdLine{
 		{
 			[]byte("LSET"),
@@ -416,7 +416,7 @@ func execRPop(db *DB, args [][]byte) redis.Reply {
 		}
 		vals := make([][]byte, count)
 		for i := 0; i < count; i++ {
-			val := list.RemoveLast().([]byte)
+			val := list.RemoveLast()
 			vals[i] = val
 		}
 		if list.Len() == 0 {
@@ -426,7 +426,7 @@ func execRPop(db *DB, args [][]byte) redis.Reply {
 		return protocol.MakeMultiBulkReply(vals)
 	}
 
-	val, _ := list.RemoveLast().([]byte)
+	val := list.RemoveLast()
 	if list.Len() == 0 {
 		db.Remove(key)
 	}
@@ -457,13 +457,13 @@ func undoRPop(db *DB, args [][]byte) []CmdLine {
 		elements := make([][]byte, count)
 		vals := list.Range(list.Len()-count, list.Len())
 		for i := 0; i < count; i++ {
-			elements[i] = vals[i].([]byte)
+			elements[i] = vals[i]
 		}
 		cmd := CmdLine{rPushCmd, args[0]}
 		cmd = append(cmd, elements...)
 		return []CmdLine{cmd}
 	}
-	element, _ := list.Get(list.Len() - 1).([]byte)
+	element := list.Get(list.Len() - 1)
 	return []CmdLine{
 		{
 			rPushCmd,
@@ -501,7 +501,7 @@ func execRPopLPush(db *DB, args [][]byte) redis.Reply {
 	}
 
 	// pop and push
-	val, _ := sourceList.RemoveLast().([]byte)
+	val := sourceList.RemoveLast()
 	destList.Insert(0, val)
 
 	if sourceList.Len() == 0 {
@@ -521,7 +521,7 @@ func undoRPopLPush(db *DB, args [][]byte) []CmdLine {
 	if list == nil || list.Len() == 0 {
 		return nil
 	}
-	element, _ := list.Get(list.Len() - 1).([]byte)
+	element := list.Get(list.Len() - 1)
 	return []CmdLine{
 		{
 			rPushCmd,
@@ -660,8 +660,8 @@ func execLInsert(db *DB, args [][]byte) redis.Reply {
 
 	pivot := string(args[2])
 	index := -1
-	list.ForEach(func(i int, v interface{}) bool {
-		if string(v.([]byte)) == pivot {
+	list.ForEach(func(i int, v []byte) bool {
+		if string(v) == pivot {
 			index = i
 			return false
 		}

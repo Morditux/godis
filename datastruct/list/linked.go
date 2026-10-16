@@ -1,24 +1,24 @@
 package list
 
 // LinkedList is doubly linked list
-type LinkedList struct {
-	first *node
-	last  *node
+type LinkedList[T any] struct {
+	first *node[T]
+	last  *node[T]
 	size  int
 }
 
-type node struct {
-	val  interface{}
-	prev *node
-	next *node
+type node[T any] struct {
+	val  T
+	prev *node[T]
+	next *node[T]
 }
 
 // Add adds value to the tail
-func (list *LinkedList) Add(val interface{}) {
+func (list *LinkedList[T]) Add(val T) {
 	if list == nil {
 		panic("list is nil")
 	}
-	n := &node{
+	n := &node[T]{
 		val: val,
 	}
 	if list.last == nil {
@@ -33,7 +33,7 @@ func (list *LinkedList) Add(val interface{}) {
 	list.size++
 }
 
-func (list *LinkedList) find(index int) (n *node) {
+func (list *LinkedList[T]) find(index int) (n *node[T]) {
 	if index < list.size/2 {
 		n = list.first
 		for i := 0; i < index; i++ {
@@ -49,7 +49,7 @@ func (list *LinkedList) find(index int) (n *node) {
 }
 
 // Get returns value at the given index
-func (list *LinkedList) Get(index int) (val interface{}) {
+func (list *LinkedList[T]) Get(index int) (val T) {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -60,7 +60,7 @@ func (list *LinkedList) Get(index int) (val interface{}) {
 }
 
 // Set updates value at the given index, the index should between [0, list.size]
-func (list *LinkedList) Set(index int, val interface{}) {
+func (list *LinkedList[T]) Set(index int, val T) {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -72,7 +72,7 @@ func (list *LinkedList) Set(index int, val interface{}) {
 }
 
 // Insert inserts value at the given index, the original element at the given index will move backward
-func (list *LinkedList) Insert(index int, val interface{}) {
+func (list *LinkedList[T]) Insert(index int, val T) {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -86,7 +86,7 @@ func (list *LinkedList) Insert(index int, val interface{}) {
 	}
 	// list is not empty
 	pivot := list.find(index)
-	n := &node{
+	n := &node[T]{
 		val:  val,
 		prev: pivot.prev,
 		next: pivot,
@@ -100,7 +100,7 @@ func (list *LinkedList) Insert(index int, val interface{}) {
 	list.size++
 }
 
-func (list *LinkedList) removeNode(n *node) {
+func (list *LinkedList[T]) removeNode(n *node[T]) {
 	if n.prev == nil {
 		list.first = n.next
 	} else {
@@ -120,7 +120,7 @@ func (list *LinkedList) removeNode(n *node) {
 }
 
 // Remove removes value at the given index
-func (list *LinkedList) Remove(index int) (val interface{}) {
+func (list *LinkedList[T]) Remove(index int) (val T) {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -133,14 +133,15 @@ func (list *LinkedList) Remove(index int) (val interface{}) {
 	return n.val
 }
 
-// RemoveLast removes the last element and returns its value
-func (list *LinkedList) RemoveLast() (val interface{}) {
+// RemoveLast removes the last element and returns its value;
+// it returns the zero value of T when the list is empty
+func (list *LinkedList[T]) RemoveLast() (val T) {
 	if list == nil {
 		panic("list is nil")
 	}
 	if list.last == nil {
 		// empty list
-		return nil
+		return val
 	}
 	n := list.last
 	list.removeNode(n)
@@ -148,13 +149,13 @@ func (list *LinkedList) RemoveLast() (val interface{}) {
 }
 
 // RemoveAllByVal removes all elements with the given val
-func (list *LinkedList) RemoveAllByVal(expected Expected) int {
+func (list *LinkedList[T]) RemoveAllByVal(expected Expected[T]) int {
 	if list == nil {
 		panic("list is nil")
 	}
 	n := list.first
 	removed := 0
-	var nextNode *node
+	var nextNode *node[T]
 	for n != nil {
 		nextNode = n.next
 		if expected(n.val) {
@@ -168,13 +169,13 @@ func (list *LinkedList) RemoveAllByVal(expected Expected) int {
 
 // RemoveByVal removes at most `count` values of the specified value in this list
 // scan from left to right
-func (list *LinkedList) RemoveByVal(expected Expected, count int) int {
+func (list *LinkedList[T]) RemoveByVal(expected Expected[T], count int) int {
 	if list == nil {
 		panic("list is nil")
 	}
 	n := list.first
 	removed := 0
-	var nextNode *node
+	var nextNode *node[T]
 	for n != nil {
 		nextNode = n.next
 		if expected(n.val) {
@@ -191,13 +192,13 @@ func (list *LinkedList) RemoveByVal(expected Expected, count int) int {
 
 // ReverseRemoveByVal removes at most `count` values of the specified value in this list
 // scan from right to left
-func (list *LinkedList) ReverseRemoveByVal(expected Expected, count int) int {
+func (list *LinkedList[T]) ReverseRemoveByVal(expected Expected[T], count int) int {
 	if list == nil {
 		panic("list is nil")
 	}
 	n := list.last
 	removed := 0
-	var prevNode *node
+	var prevNode *node[T]
 	for n != nil {
 		prevNode = n.prev
 		if expected(n.val) {
@@ -213,7 +214,7 @@ func (list *LinkedList) ReverseRemoveByVal(expected Expected, count int) int {
 }
 
 // Len returns the number of elements in list
-func (list *LinkedList) Len() int {
+func (list *LinkedList[T]) Len() int {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -222,7 +223,7 @@ func (list *LinkedList) Len() int {
 
 // ForEach visits each element in the list
 // if the consumer returns false, the loop will be break
-func (list *LinkedList) ForEach(consumer Consumer) {
+func (list *LinkedList[T]) ForEach(consumer Consumer[T]) {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -239,9 +240,9 @@ func (list *LinkedList) ForEach(consumer Consumer) {
 }
 
 // Contains returns whether the given value exist in the list
-func (list *LinkedList) Contains(expected Expected) bool {
+func (list *LinkedList[T]) Contains(expected Expected[T]) bool {
 	contains := false
-	list.ForEach(func(i int, actual interface{}) bool {
+	list.ForEach(func(i int, actual T) bool {
 		if expected(actual) {
 			contains = true
 			return false
@@ -252,7 +253,7 @@ func (list *LinkedList) Contains(expected Expected) bool {
 }
 
 // Range returns elements which index within [start, stop)
-func (list *LinkedList) Range(start int, stop int) []interface{} {
+func (list *LinkedList[T]) Range(start int, stop int) []T {
 	if list == nil {
 		panic("list is nil")
 	}
@@ -264,7 +265,7 @@ func (list *LinkedList) Range(start int, stop int) []interface{} {
 	}
 
 	sliceSize := stop - start
-	slice := make([]interface{}, sliceSize)
+	slice := make([]T, sliceSize)
 	n := list.first
 	i := 0
 	sliceIndex := 0
@@ -282,8 +283,8 @@ func (list *LinkedList) Range(start int, stop int) []interface{} {
 }
 
 // Make creates a new linked list
-func Make(vals ...interface{}) *LinkedList {
-	list := LinkedList{}
+func Make[T any](vals ...T) *LinkedList[T] {
+	list := LinkedList[T]{}
 	for _, v := range vals {
 		list.Add(v)
 	}

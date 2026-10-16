@@ -69,7 +69,7 @@ func getType(db *DB, key string) string {
 	switch entity.Data.(type) {
 	case []byte:
 		return "string"
-	case list.List:
+	case list.List[[]byte]:
 		return "list"
 	case dict.Dict[[]byte]:
 		return "hash"

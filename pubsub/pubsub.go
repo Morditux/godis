@@ -31,10 +31,10 @@ func subscribe0(hub *Hub, channel string, client redis.Connection) bool {
 	// add into hub.subs
 	subscribers, ok := hub.subs.Get(channel)
 	if !ok {
-		subscribers = list.Make()
+		subscribers = list.Make[redis.Connection]()
 		hub.subs.Put(channel, subscribers)
 	}
-	if subscribers.Contains(func(a interface{}) bool {
+	if subscribers.Contains(func(a redis.Connection) bool {
 		return a == client
 	}) {
 		return false
@@ -53,7 +53,7 @@ func unsubscribe0(hub *Hub, channel string, client redis.Connection) bool {
 	// remove from hub.subs
 	subscribers, ok := hub.subs.Get(channel)
 	if ok {
-		subscribers.RemoveAllByVal(func(a interface{}) bool {
+		subscribers.RemoveAllByVal(func(a redis.Connection) bool {
 			return utils.Equals(a, client)
 		})
 
@@ -140,13 +140,12 @@ func Publish(hub *Hub, args [][]byte) redis.Reply {
 	if !ok {
 		return protocol.MakeIntReply(0)
 	}
-	subscribers.ForEach(func(i int, c interface{}) bool {
-		client, _ := c.(redis.Connection)
+	subscribers.ForEach(func(i int, c redis.Connection) bool {
 		replyArgs := make([][]byte, 3)
 		replyArgs[0] = messageBytes
 		replyArgs[1] = []byte(channel)
 		replyArgs[2] = message
-		_, _ = client.Write(protocol.MakeMultiBulkReply(replyArgs).ToBytes())
+		_, _ = c.Write(protocol.MakeMultiBulkReply(replyArgs).ToBytes())
 		return true
 	})
 	return protocol.MakeIntReply(int64(subscribers.Len()))

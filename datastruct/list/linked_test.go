@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-func ToString(list *LinkedList) string {
+func ToString(list *LinkedList[int]) string {
 	arr := make([]string, list.size)
-	list.ForEach(func(i int, v interface{}) bool {
-		integer, _ := v.(int)
+	list.ForEach(func(i int, v int) bool {
+		integer := v
 		arr[i] = strconv.Itoa(integer)
 		return true
 	})
@@ -18,12 +18,12 @@ func ToString(list *LinkedList) string {
 }
 
 func TestAdd(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 	}
-	list.ForEach(func(i int, v interface{}) bool {
-		intVal, _ := v.(int)
+	list.ForEach(func(i int, v int) bool {
+		intVal := v
 		if intVal != i {
 			t.Error("add test fail: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 		}
@@ -32,30 +32,30 @@ func TestAdd(t *testing.T) {
 }
 
 func BenchmarkLinkedList_Add(b *testing.B) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < pageSize*10; i++ {
 		list.Add(i)
 	}
 }
 
 func BenchmarkLinkedList_Range(b *testing.B) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < pageSize*10; i++ {
 		list.Add(i)
 	}
-	list.ForEach(func(i int, v interface{}) bool {
+	list.ForEach(func(i int, v int) bool {
 		return true
 	})
 }
 
 func TestLinkedList_Contains(t *testing.T) {
-	list := Make(1, 2, 3, 4)
-	if !list.Contains(func(a interface{}) bool {
+	list := Make[int](1, 2, 3, 4)
+	if !list.Contains(func(a int) bool {
 		return a == 1
 	}) {
 		t.Error("expect true actual false")
 	}
-	if list.Contains(func(a interface{}) bool {
+	if list.Contains(func(a int) bool {
 		return a == -1
 	}) {
 		t.Error("expect false actual true")
@@ -63,13 +63,12 @@ func TestLinkedList_Contains(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 	}
 	for i := 0; i < 10; i++ {
-		v := list.Get(i)
-		k, _ := v.(int)
+		k := list.Get(i)
 		if i != k {
 			t.Error("get test fail: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(k))
 		}
@@ -77,7 +76,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestRemove(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 	}
@@ -86,8 +85,8 @@ func TestRemove(t *testing.T) {
 		if i != list.Len() {
 			t.Error("remove test fail: expected size " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(list.Len()))
 		}
-		list.ForEach(func(i int, v interface{}) bool {
-			intVal, _ := v.(int)
+		list.ForEach(func(i int, v int) bool {
+			intVal := v
 			if intVal != i {
 				t.Error("remove test fail: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 			}
@@ -97,17 +96,17 @@ func TestRemove(t *testing.T) {
 }
 
 func TestRemoveVal(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 		list.Add(i)
 	}
 	for index := 0; index < list.Len(); index++ {
-		list.RemoveAllByVal(func(a interface{}) bool {
+		list.RemoveAllByVal(func(a int) bool {
 			return utils.Equals(a, index)
 		})
-		list.ForEach(func(i int, v interface{}) bool {
-			intVal, _ := v.(int)
+		list.ForEach(func(i int, v int) bool {
+			intVal := v
 			if intVal == index {
 				t.Error("remove test fail: found  " + strconv.Itoa(index) + " at index: " + strconv.Itoa(i))
 			}
@@ -115,25 +114,25 @@ func TestRemoveVal(t *testing.T) {
 		})
 	}
 
-	list = Make()
+	list = Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 		list.Add(i)
 	}
 	for i := 0; i < 10; i++ {
-		list.RemoveByVal(func(a interface{}) bool {
+		list.RemoveByVal(func(a int) bool {
 			return utils.Equals(a, i)
 		}, 1)
 	}
-	list.ForEach(func(i int, v interface{}) bool {
-		intVal, _ := v.(int)
+	list.ForEach(func(i int, v int) bool {
+		intVal := v
 		if intVal != i {
 			t.Error("test fail: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 		}
 		return true
 	})
 	for i := 0; i < 10; i++ {
-		list.RemoveByVal(func(a interface{}) bool {
+		list.RemoveByVal(func(a int) bool {
 			return utils.Equals(a, i)
 		}, 1)
 	}
@@ -141,25 +140,25 @@ func TestRemoveVal(t *testing.T) {
 		t.Error("test fail: expected 0, actual: " + strconv.Itoa(list.Len()))
 	}
 
-	list = Make()
+	list = Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 		list.Add(i)
 	}
 	for i := 0; i < 10; i++ {
-		list.ReverseRemoveByVal(func(a interface{}) bool {
+		list.ReverseRemoveByVal(func(a int) bool {
 			return a == i
 		}, 1)
 	}
-	list.ForEach(func(i int, v interface{}) bool {
-		intVal, _ := v.(int)
+	list.ForEach(func(i int, v int) bool {
+		intVal := v
 		if intVal != i {
 			t.Error("test fail: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 		}
 		return true
 	})
 	for i := 0; i < 10; i++ {
-		list.ReverseRemoveByVal(func(a interface{}) bool {
+		list.ReverseRemoveByVal(func(a int) bool {
 			return a == i
 		}, 1)
 	}
@@ -170,14 +169,14 @@ func TestRemoveVal(t *testing.T) {
 }
 
 func TestInsert(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 	}
 	for i := 0; i < 10; i++ {
 		list.Insert(i*2, i)
 
-		list.ForEach(func(j int, v interface{}) bool {
+		list.ForEach(func(j int, v int) bool {
 			var expected int
 			if j < (i+1)*2 {
 				if j%2 == 0 {
@@ -188,7 +187,7 @@ func TestInsert(t *testing.T) {
 			} else {
 				expected = j - i - 1
 			}
-			actual, _ := list.Get(j).(int)
+			actual := list.Get(j)
 			if actual != expected {
 				t.Error("insert test fail: at i " + strconv.Itoa(i) + " expected " + strconv.Itoa(expected) + ", actual: " + strconv.Itoa(actual))
 			}
@@ -206,7 +205,7 @@ func TestInsert(t *testing.T) {
 			} else {
 				expected = j - i - 1
 			}
-			actual, _ := list.Get(j).(int)
+			actual := list.Get(j)
 			if actual != expected {
 				t.Error("insert test fail: at i " + strconv.Itoa(i) + " expected " + strconv.Itoa(expected) + ", actual: " + strconv.Itoa(actual))
 			}
@@ -216,13 +215,12 @@ func TestInsert(t *testing.T) {
 }
 
 func TestRemoveLast(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	for i := 0; i < 10; i++ {
 		list.Add(i)
 	}
 	for i := 9; i >= 0; i-- {
-		val := list.RemoveLast()
-		intVal, _ := val.(int)
+		intVal := list.RemoveLast()
 		if intVal != i {
 			t.Error("add test fail: expected " + strconv.Itoa(i) + ", actual: " + strconv.Itoa(intVal))
 		}
@@ -230,7 +228,7 @@ func TestRemoveLast(t *testing.T) {
 }
 
 func TestRange(t *testing.T) {
-	list := Make()
+	list := Make[int]()
 	size := 10
 	for i := 0; i < size; i++ {
 		list.Add(i)
@@ -244,8 +242,7 @@ func TestRange(t *testing.T) {
 			}
 			sliceIndex := 0
 			for i := start; i < stop; i++ {
-				val := slice[sliceIndex]
-				intVal, _ := val.(int)
+				intVal := slice[sliceIndex]
 				if intVal != i {
 					t.Error("expected " + strconv.Itoa(i) + ", get: " + strconv.Itoa(intVal) +
 						", range: [" + strconv.Itoa(start) + "," + strconv.Itoa(stop) + "]")
