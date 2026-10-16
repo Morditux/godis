@@ -29,7 +29,12 @@ type Client struct {
 	ticker      *time.Ticker
 	addr        string
 
-	status  int32
+	status int32
+	// doneCh is closed in Close; senders block in select on pendingReqs/doneCh
+	// to avoid sending on a closed channel
+	doneCh chan struct{}
+	// connMu guards conn and waitingReqs against concurrent reconnect
+	connMu  sync.Mutex
 	working *sync.WaitGroup // its counter presents unfinished requests(pending and waiting)
 }
 
@@ -59,6 +64,7 @@ func MakeClient(addr string) (*Client, error) {
 		conn:        conn,
 		pendingReqs: make(chan *request, chanSize),
 		waitingReqs: make(chan *request, chanSize),
+		doneCh:      make(chan struct{}),
 		working:     &sync.WaitGroup{},
 	}, nil
 }
@@ -73,28 +79,61 @@ func (client *Client) Start() {
 	go client.handleWrite()
 	go client.handleRead()
 	go client.heartbeat()
+	if atomic.CompareAndSwapInt32(&client.status, created, running) {
+		return
+	}
 	atomic.StoreInt32(&client.status, running)
 }
 
-// Close stops asynchronous goroutines and close connection
+// Close stops asynchronous goroutines and close connection;
+// calling Close more than once is safe
 func (client *Client) Close() {
-	atomic.StoreInt32(&client.status, closed)
-	client.ticker.Stop()
+	if !atomic.CompareAndSwapInt32(&client.status, running, closed) {
+		return
+	}
+	if client.ticker != nil {
+		client.ticker.Stop()
+	}
+	close(client.doneCh) // all pendingReqs senders quit with a "client closed" error
 	// stop new request
 	close(client.pendingReqs)
 
 	// wait stop process
 	client.working.Wait()
 
-	// clean
-	_ = client.conn.Close()
-	close(client.waitingReqs)
+	// clean: waitingReqs is left unclosed on purpose, as its senders are all
+	// finished after working.Wait() and requests inside are simply garbage.
+	// conn may be nil while reconnect() is re-establishing the connection.
+	client.connMu.Lock()
+	conn := client.conn
+	client.conn = nil
+	client.connMu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func (client *Client) reconnect() {
 	logger.Info("reconnect with: " + client.addr)
+	// Part 1: under connMu, close the old conn and fail every request
+	// that is waiting for a response. doRequest is guarded by connMu as well,
+	// so no one can send to the closed waitingReqs channel.
+	client.connMu.Lock()
+	if atomic.LoadInt32(&client.status) != running {
+		client.connMu.Unlock()
+		return
+	}
 	_ = client.conn.Close() // ignore possible errors from repeated closes
+	close(client.waitingReqs)
+	for req := range client.waitingReqs {
+		req.err = errors.New("connection closed")
+		req.waiting.Done()
+	}
+	client.waitingReqs = make(chan *request, chanSize)
+	client.conn = nil
+	client.connMu.Unlock()
 
+	// Part 2: dial with retries, without holding connMu
 	var conn net.Conn
 	for i := 0; i < 3; i++ {
 		var err error
@@ -111,21 +150,34 @@ func (client *Client) reconnect() {
 		client.Close()
 		return
 	}
-	client.conn = conn
 
-	close(client.waitingReqs)
-	for req := range client.waitingReqs {
-		req.err = errors.New("connection closed")
-		req.waiting.Done()
+	// Part 3: install the new connection
+	client.connMu.Lock()
+	if atomic.LoadInt32(&client.status) != running {
+		client.connMu.Unlock()
+		_ = conn.Close()
+		return
 	}
-	client.waitingReqs = make(chan *request, chanSize)
+	client.conn = conn
+	client.connMu.Unlock()
 	// restart handle read
 	go client.handleRead()
 }
 
 func (client *Client) heartbeat() {
-	for range client.ticker.C {
-		client.doHeartbeat()
+	if client.ticker == nil {
+		return
+	}
+	for {
+		select {
+		case <-client.ticker.C:
+			if atomic.LoadInt32(&client.status) != running {
+				return
+			}
+			client.doHeartbeat()
+		case <-client.doneCh:
+			return
+		}
 	}
 }
 
@@ -148,7 +200,11 @@ func (client *Client) Send(args [][]byte) redis.Reply {
 	req.waiting.Add(1)
 	client.working.Add(1)
 	defer client.working.Done()
-	client.pendingReqs <- req
+	select {
+	case client.pendingReqs <- req:
+	case <-client.doneCh:
+		return protocol.MakeErrReply("client closed")
+	}
 	timeout := req.waiting.WaitWithTimeout(maxWait)
 	if timeout {
 		return protocol.MakeErrReply("server time out")
@@ -168,7 +224,11 @@ func (client *Client) doHeartbeat() {
 	request.waiting.Add(1)
 	client.working.Add(1)
 	defer client.working.Done()
-	client.pendingReqs <- request
+	select {
+	case client.pendingReqs <- request:
+	case <-client.doneCh:
+		return
+	}
 	request.waiting.WaitWithTimeout(maxWait)
 }
 
@@ -178,6 +238,15 @@ func (client *Client) doRequest(req *request) {
 	}
 	re := protocol.MakeMultiBulkReply(req.args)
 	bytes := re.ToBytes()
+	// connMu guards conn/writing and waitingReqs sending: the same lock is
+	// taken during reconnect, so no request can be sent to a closed waitingReqs
+	client.connMu.Lock()
+	defer client.connMu.Unlock()
+	if client.conn == nil { // the connection is down and being re-established
+		req.err = errors.New("connection closed")
+		req.waiting.Done()
+		return
+	}
 	var err error
 	for i := 0; i < 3; i++ { // only retry, waiting for handleRead
 		_, err = client.conn.Write(bytes)
@@ -213,7 +282,9 @@ func (client *Client) finishRequest(reply redis.Reply) {
 }
 
 func (client *Client) handleRead() {
-	ch := parser.ParseStream(client.conn)
+	stop := make(chan struct{})
+	ch := parser.ParseStreamWithStop(client.conn, stop)
+	defer close(stop)
 	for payload := range ch {
 		if payload.Err != nil {
 			status := atomic.LoadInt32(&client.status)

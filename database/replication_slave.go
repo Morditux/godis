@@ -43,8 +43,11 @@ type slaveStatus struct {
 	masterHost string
 	masterPort int
 
-	masterConn   net.Conn
-	masterChan   <-chan *parser.Payload
+	masterConn net.Conn
+	masterChan <-chan *parser.Payload
+	// stopParser closes the channel accepted by parser.ParseStreamWithStop,
+	// terminating the internal parse goroutine together with conn close
+	stopParser   chan struct{}
 	replId       string
 	replOffset   int64
 	lastRecvTime time.Time
@@ -102,7 +105,16 @@ func (repl *slaveStatus) stopSlaveWithMutex() {
 	repl.ctx = context.Background()
 	repl.cancel = nil
 	if repl.masterConn != nil {
-		_ = repl.masterConn.Close() // parser.ParseStream will close masterChan
+		/*
+		 * masterConn must be closed to unblock the parse goroutine reading it.
+		 * The channel returned by ParseStreamWithStop is closed when the parse
+		 * goroutine exits, so `for range masterChan` consumers finish as well.
+		 */
+		_ = repl.masterConn.Close()
+	}
+	if repl.stopParser != nil {
+		close(repl.stopParser)
+		repl.stopParser = nil
 	}
 	repl.masterConn = nil
 	repl.masterChan = nil
@@ -162,7 +174,17 @@ func (server *Server) connectWithMaster(configVersion int32) (bool, error) {
 		server.slaveOfNone() // abort
 		return false, errors.New("connect master failed " + err.Error())
 	}
-	masterChan := parser.ParseStream(conn)
+	// bound marks whether conn/stop were installed into slaveStatus;
+	// when the handshake fails we must release the parser resources here
+	stop := make(chan struct{})
+	masterChan := parser.ParseStreamWithStop(conn, stop)
+	bound := false
+	defer func() {
+		if !bound {
+			_ = conn.Close()
+			close(stop)
+		}
+	}()
 
 	// ping
 	pingCmdLine := utils.ToCmdLine("ping")
@@ -253,7 +275,10 @@ func (server *Server) connectWithMaster(configVersion int32) (bool, error) {
 	}
 	server.slaveStatus.masterConn = conn
 	server.slaveStatus.masterChan = masterChan
+	server.slaveStatus.stopParser = stop
 	server.slaveStatus.lastRecvTime = time.Now()
+	// from here on, teardown is owned by stopSlaveWithMutex (see stopSlaveWithMutex)
+	bound = true
 	return server.psyncHandshake()
 }
 

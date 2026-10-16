@@ -77,7 +77,9 @@ func (factory *defaultClientFactory) BorrowPeerClient(peerAddr string) (peerClie
 		}
 		finalizer := func(x interface{}) {
 			logger.Debug("destroy client")
-			cli, ok := x.(client.Client)
+			// must assert pointer type: `x.(client.Client)` never matched
+			// since the pool stores `*client.Client`, leaking every connection
+			cli, ok := x.(*client.Client)
 			if !ok {
 				return
 			}

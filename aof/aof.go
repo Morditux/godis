@@ -72,6 +72,8 @@ type Persister struct {
 	listeners  map[Listener]struct{}
 	// reuse cmdLine buffer
 	buffer []CmdLine
+	// closeOnce guards double Close
+	closeOnce sync.Once
 }
 
 // NewPersister creates a new aof.Persister
@@ -138,12 +140,34 @@ func (persister *Persister) SaveCmdLine(dbIndex int, cmdLine CmdLine) {
 
 }
 
-// listenCmd listen aof channel and write into file
+// listenCmd listen aof channel and write into file.
+// It stops when persister.ctx is canceled, after draining remaining payloads.
 func (persister *Persister) listenCmd() {
-	for p := range persister.aofChan {
-		persister.writeAof(p)
+	defer func() {
+		persister.aofFinished <- struct{}{}
+	}()
+	for {
+		select {
+		case <-persister.ctx.Done():
+			// drain remaining buffered payloads and exit;
+			// commands submitted afterwards are lost:
+			// within this shutdown window, request execution should already
+			// have stopped (invokers must stop enqueuing before closing)
+			for {
+				select {
+				case p, ok := <-persister.aofChan:
+					if !ok {
+						return
+					}
+					persister.writeAof(p)
+				default:
+					return
+				}
+			}
+		case p := <-persister.aofChan:
+			persister.writeAof(p)
+		}
 	}
-	persister.aofFinished <- struct{}{}
 }
 
 func (persister *Persister) writeAof(p *payload) {
@@ -257,26 +281,34 @@ func (persister *Persister) Fsync() {
 	persister.pausingAof.Unlock()
 }
 
-// Close gracefully stops aof persistence procedure
+// Close gracefully stops aof persistence procedure; calling it repeatedly is safe
 func (persister *Persister) Close() {
 	if persister == nil {
 		return
 	}
-	if persister.aofFile != nil {
-		close(persister.aofChan)
-		<-persister.aofFinished // wait for aof finished
-		err := persister.aofFile.Close()
-		if err != nil {
-			logger.Warn(err)
+	persister.closeOnce.Do(func() {
+		if persister.aofFile != nil {
+			/*
+			 * Close used to close(persister.aofChan) which could panic with
+			 * `send on closed channel` if SaveCmdLine was running concurrently.
+			 * Now we signal shutdown through ctx: the aof goroutine drains
+			 * its queue and exits, and never corrupts on late submissions.
+			 */
+			persister.cancel()
+			<-persister.aofFinished // wait for aof finished
+			err := persister.aofFile.Close()
+			if err != nil {
+				logger.Warn(err)
+			}
 		}
-	}
-	persister.cancel()
+	})
 }
 
 // fsyncEverySecond fsync aof file every second
 func (persister *Persister) fsyncEverySecond() {
 	ticker := time.NewTicker(time.Second)
 	go func() {
+		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:

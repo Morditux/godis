@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/hdt3213/godis/cluster"
 	"github.com/hdt3213/godis/config"
@@ -56,8 +58,14 @@ func main() {
 	}
 	listenAddr := fmt.Sprintf("%s:%d", config.Properties.Bind, config.Properties.Port)
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
 	var err error
 	if config.Properties.UseGnet {
+		// gnet engine currently does not handle signals by itself;
+		// stop the engine and release db resources on SIGINT/SIGTERM,
+		// otherwise AOF is left un-fsynced and raft members are shut down abruptly
 		var db idatabase.DB
 		if config.Properties.ClusterEnable {
 			db = cluster.MakeCluster()
@@ -65,7 +73,15 @@ func main() {
 			db = database.NewStandaloneServer()
 		}
 		server := gnet.NewGnetServer(db)
+		go func() {
+			sig := <-sigCh
+			logger.Infof("receive signal %s, shutting down...", sig)
+			server.Close()
+		}()
 		err = server.Run(listenAddr)
+		// release resources after the engine has stopped; db.Close is idempotent.
+		// (std mode releases resources inside its tcp handler on its own)
+		db.Close()
 	} else {
 		handler := stdserver.MakeHandler()
 		err = stdserver.Serve(listenAddr, handler)
