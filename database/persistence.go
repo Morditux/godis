@@ -20,7 +20,7 @@ import (
 func (server *Server) loadRdbFile() error {
 	rdbFile, err := os.Open(config.Properties.RDBFilename)
 	if err != nil {
-		return fmt.Errorf("open rdb file failed " + err.Error())
+		return fmt.Errorf("open rdb file failed: %v", err)
 	}
 	defer func() {
 		_ = rdbFile.Close()
@@ -28,7 +28,7 @@ func (server *Server) loadRdbFile() error {
 	decoder := rdb.NewDecoder(rdbFile)
 	err = server.LoadRDB(decoder)
 	if err != nil {
-		return fmt.Errorf("load rdb file failed " + err.Error())
+		return fmt.Errorf("load rdb file failed: %v", err)
 	}
 	return nil
 }

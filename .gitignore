@@ -14,13 +14,23 @@
 *.out
 target/
 coverage.txt
+profile.cov
 node1/
 node2/
 
 logs
 
+# godis binary built at repo root
+/godis
+
+# test/fixture artifacts
+test.rdb
+
 # jetbrains
 .idea
 *.iml
 redis2.conf
+
+# vscode
+.vscode/
 

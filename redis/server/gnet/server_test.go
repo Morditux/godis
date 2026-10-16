@@ -20,7 +20,7 @@ func TestListenAndServe(t *testing.T) {
 	db := database.NewStandaloneServer()
 	server := NewGnetServer(db)
 	go server.Run(addr)
-	time.Sleep(2*time.Second)
+	time.Sleep(2 * time.Second)
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Error(err)

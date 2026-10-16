@@ -39,7 +39,7 @@ func TestLoadRDB(t *testing.T) {
 	// test no rdb file
 	config.Properties = &config.ServerProperties{
 		AppendOnly:  false,
-		RDBFilename:  "noexists.rdb", 
+		RDBFilename: "noexists.rdb",
 	}
 	rdbDB = NewStandaloneServer()
 	result = rdbDB.Exec(conn, utils.ToCmdLine("Get", "str"))

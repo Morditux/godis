@@ -59,7 +59,6 @@ func (h *Handler) closeClient(client *connection.Connection) {
 	h.activeConn.Delete(client)
 }
 
-
 // Handle receives and executes redis commands
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	if h.closing.Get() {

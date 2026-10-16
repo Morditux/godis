@@ -21,8 +21,8 @@ func TestSlowLogger_Record(t *testing.T) {
 		t.Errorf("Expected 1 entry, got %d", logger.Len())
 	}
 	for i, e := range logger.entries {
-		actual :=  string(e.Command[1])
-		expect := strconv.Itoa(i+5)
+		actual := string(e.Command[1])
+		expect := strconv.Itoa(i + 5)
 		if actual != expect {
 			t.Errorf("Expected %s, got %s", expect, actual)
 		}

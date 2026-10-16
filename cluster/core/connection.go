@@ -176,4 +176,3 @@ func (factory *defaultClientFactory) Close() error {
 	})
 	return nil
 }
-

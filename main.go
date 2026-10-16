@@ -55,7 +55,7 @@ func main() {
 		config.SetupConfig(configFilename)
 	}
 	listenAddr := fmt.Sprintf("%s:%d", config.Properties.Bind, config.Properties.Port)
-	
+
 	var err error
 	if config.Properties.UseGnet {
 		var db idatabase.DB

@@ -79,7 +79,7 @@ func (fsm *FSM) failover(oldMasterId, newMasterId string) {
 	}
 }
 
-// GetMaster returns the master's redis service addres 
+// GetMaster returns the master's redis service addres
 // Returns empty string ("") if id points to a master node
 func (fsm *FSM) GetMaster(id string) string {
 	master := ""

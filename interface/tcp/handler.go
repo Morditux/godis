@@ -3,7 +3,6 @@ package tcp
 import (
 	"context"
 	"net"
-
 )
 
 // HandleFunc represents application handler function
