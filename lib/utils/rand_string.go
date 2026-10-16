@@ -2,14 +2,21 @@ package utils
 
 import (
 	"math/rand"
+	"sync"
 	"time"
 )
 
 var r = rand.New(rand.NewSource(time.Now().UnixNano()))
 var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
+// randMu guards r: rand.Rand is not goroutine-safe, and RandString /
+// RandHexString do run concurrently (e.g. cluster tx ids, failover)
+var randMu sync.Mutex
+
 // RandString create a random string no longer than n
 func RandString(n int) string {
+	randMu.Lock()
+	defer randMu.Unlock()
 	b := make([]rune, n)
 	for i := range b {
 		b[i] = letters[r.Intn(len(letters))]
@@ -20,6 +27,8 @@ func RandString(n int) string {
 var hexLetters = []rune("0123456789abcdef")
 
 func RandHexString(n int) string {
+	randMu.Lock()
+	defer randMu.Unlock()
 	b := make([]rune, n)
 	for i := range b {
 		b[i] = hexLetters[r.Intn(len(hexLetters))]

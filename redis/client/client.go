@@ -282,8 +282,17 @@ func (client *Client) finishRequest(reply redis.Reply) {
 }
 
 func (client *Client) handleRead() {
+	// read conn under connMu: Close/reconnect swap it concurrently;
+	// the snapshot stays valid until the connection dies
+	client.connMu.Lock()
+	conn := client.conn
+	client.connMu.Unlock()
+	if conn == nil {
+		// connection was closed while starting
+		return
+	}
 	stop := make(chan struct{})
-	ch := parser.ParseStreamWithStop(client.conn, stop)
+	ch := parser.ParseStreamWithStop(conn, stop)
 	defer close(stop)
 	for payload := range ch {
 		if payload.Err != nil {

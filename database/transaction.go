@@ -8,10 +8,9 @@ import (
 
 // Watch set watching keys
 func Watch(db *DB, conn redis.Connection, args [][]byte) redis.Reply {
-	watching := conn.GetWatching()
 	for _, bkey := range args {
 		key := string(bkey)
-		watching[key] = db.GetVersion(key)
+		conn.SetWatching(key, db.GetVersion(key))
 	}
 	return protocol.MakeOkReply()
 }

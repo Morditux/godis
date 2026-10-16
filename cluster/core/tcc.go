@@ -20,6 +20,9 @@ type TransactionManager struct {
 }
 
 type TCC struct {
+	// mu guards the fields below: a slow prepare may still be running while
+	// commit/rollback arrive from a retrying client or another node
+	mu          sync.Mutex
 	realCmdLine CmdLine
 	undoLogs    []CmdLine
 	writeKeys   []string
@@ -61,15 +64,22 @@ func execPrepare(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.Re
 	cluster.transactions.txs[txId] = tx
 	cluster.transactions.mu.Unlock()
 
-	// prepare lock and undo locks
-	tx.writeKeys, tx.readKeys = database.GetRelatedKeys(realCmdLine)
-	cluster.db.RWLocks(0, tx.writeKeys, tx.readKeys)
-	tx.undoLogs = cluster.db.GetUndoLogs(0, realCmdLine)
+	// lock keys and generate undo logs before publishing the transaction state
+	writeKeys, readKeys := database.GetRelatedKeys(realCmdLine)
+	cluster.db.RWLocks(0, writeKeys, readKeys)
+	undoLogs := cluster.db.GetUndoLogs(0, realCmdLine)
+	tx.mu.Lock()
+	tx.writeKeys = writeKeys
+	tx.readKeys = readKeys
+	tx.undoLogs = undoLogs
 	tx.realCmdLine = realCmdLine
 	tx.hasLock = true
+	tx.mu.Unlock()
 
 	// execute prepare func
+	prepareFuncsMu.RLock()
 	prepareFunc := prepareFuncs[strings.ToLower(string(realCmdLine[0]))]
+	prepareFuncsMu.RUnlock()
 	var result redis.Reply
 	if prepareFunc != nil {
 		result = prepareFunc(cluster, c, realCmdLine)
@@ -78,8 +88,10 @@ func execPrepare(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.Re
 	}
 	if protocol.IsErrorReply(result) {
 		// prepare for rollback
-		cluster.db.RWUnLocks(0, tx.writeKeys, tx.readKeys)
+		cluster.db.RWUnLocks(0, writeKeys, readKeys)
+		tx.mu.Lock()
 		tx.hasLock = false
+		tx.mu.Unlock()
 	}
 	return result
 }
@@ -97,11 +109,27 @@ func execCommit(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.Rep
 		return protocol.MakeErrReply("transaction not found")
 	}
 
-	resp := cluster.db.ExecWithLock(c, tx.realCmdLine)
+	// snapshot the transaction state
+	tx.mu.Lock()
+	realCmdLine := tx.realCmdLine
+	writeKeys := tx.writeKeys
+	readKeys := tx.readKeys
+	locked := tx.hasLock
+	tx.mu.Unlock()
+	if realCmdLine == nil {
+		// the transaction is not fully prepared yet
+		return protocol.MakeErrReply("transaction not prepared")
+	}
 
-	// unlock regardless of result
-	cluster.db.RWUnLocks(0, tx.writeKeys, tx.readKeys)
-	tx.hasLock = false
+	resp := cluster.db.ExecWithLock(c, realCmdLine)
+
+	// unlock regardless of result, but only once
+	if locked {
+		cluster.db.RWUnLocks(0, writeKeys, readKeys)
+		tx.mu.Lock()
+		tx.hasLock = false
+		tx.mu.Unlock()
+	}
 
 	if protocol.IsErrorReply(resp) {
 		// do not delete transaction, waiting rollback
@@ -131,16 +159,27 @@ func execRollback(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.R
 		return protocol.MakeErrReply("transaction not found")
 	}
 
-	// rollback
-	if !tx.hasLock {
-		cluster.db.RWLocks(0, tx.writeKeys, tx.readKeys)
+	// snapshot the transaction state
+	tx.mu.Lock()
+	writeKeys := tx.writeKeys
+	readKeys := tx.readKeys
+	undoLogs := tx.undoLogs
+	locked := tx.hasLock
+	if !locked {
+		cluster.db.RWLocks(0, writeKeys, readKeys)
 		tx.hasLock = true
 	}
-	for i := len(tx.undoLogs) - 1; i >= 0; i-- {
-		cmdline := tx.undoLogs[i]
+	tx.mu.Unlock()
+
+	// rollback
+	for i := len(undoLogs) - 1; i >= 0; i-- {
+		cmdline := undoLogs[i]
 		cluster.db.ExecWithLock(c, cmdline)
 	}
-	cluster.db.RWUnLocks(0, tx.writeKeys, tx.readKeys)
+	cluster.db.RWUnLocks(0, writeKeys, readKeys)
+	tx.mu.Lock()
+	tx.hasLock = false
+	tx.mu.Unlock()
 
 	// delete transaction
 	cluster.transactions.mu.Lock()
@@ -150,12 +189,17 @@ func execRollback(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.R
 	return protocol.MakeOkReply()
 }
 
-var prepareFuncs = make(map[string]CmdFunc)
+var (
+	prepareFuncsMu sync.RWMutex // guards prepareFuncs, registration happens in init or at startup
+	prepareFuncs   = make(map[string]CmdFunc)
+)
 
 // RegisterCmd add tcc preparing validator
 // prepareFunc will be executed within lock
 // If prepareFunc returns an error reply, the transaction should be rolledback-
 func RegisterPrepareFunc(name string, fn CmdFunc) {
+	prepareFuncsMu.Lock()
+	defer prepareFuncsMu.Unlock()
 	name = strings.ToLower(name)
 	prepareFuncs[name] = fn
 }

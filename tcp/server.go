@@ -27,7 +27,14 @@ type Config struct {
 }
 
 // ClientCounter Record the number of clients in the current Godis server
+// ClientCounter must be accessed atomically (see LoadClientCounter)
 var ClientCounter int32
+
+// LoadClientCounter reads the number of clients connected to all tcp servers atomically.
+// Database INFO reads it through a std-server-installed hook, avoiding an import cycle.
+func LoadClientCounter() int32 {
+	return atomic.LoadInt32(&ClientCounter)
+}
 
 // ListenAndServeWithSignal binds port and handle requests, blocking until receive stop signal
 func ListenAndServeWithSignal(cfg *Config, handler tcp.Handler) error {

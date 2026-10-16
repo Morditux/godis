@@ -2,27 +2,39 @@ package gnet
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
-	"github.com/hdt3213/godis/interface/database"
+	idatabase "github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/lib/logger"
 	"github.com/hdt3213/godis/redis/connection"
 	"github.com/hdt3213/godis/redis/parser"
+
+	"github.com/hdt3213/godis/database"
 	"github.com/panjf2000/gnet/v2"
 )
 
 type GnetServer struct {
 	gnet.BuiltinEventEngine
+	booted    chan struct{} // closed by OnBoot; Close waits for it (happens-before edge for eng)
 	eng       gnet.Engine
 	connected int32
-	db        database.DB
+	db        idatabase.DB
+	stopOnce  sync.Once
 }
 
-func NewGnetServer(db database.DB) *GnetServer {
-	return &GnetServer{
-		db: db,
+func NewGnetServer(db idatabase.DB) *GnetServer {
+	s := &GnetServer{
+		db:     db,
+		booted: make(chan struct{}),
 	}
+	// expose this engine's client count to the INFO command; the gnet engine
+	// does not use the tcp package so it reports its own counter
+	database.ClientCountFunc = func() int64 {
+		return int64(atomic.LoadInt32(&s.connected))
+	}
+	return s
 }
 
 func (s *GnetServer) Run(listenAddr string) error {
@@ -31,6 +43,7 @@ func (s *GnetServer) Run(listenAddr string) error {
 
 func (s *GnetServer) OnBoot(eng gnet.Engine) (action gnet.Action) {
 	s.eng = eng
+	close(s.booted)
 	return
 }
 
@@ -69,6 +82,11 @@ func (s *GnetServer) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	return gnet.None
 }
 
+// Close stops the engine; it first waits for the boot to complete because
+// gnet Engine.Stop is not safe to call while run() is still initializing
 func (s *GnetServer) Close() {
-	s.eng.Stop(context.Background())
+	s.stopOnce.Do(func() {
+		<-s.booted
+		s.eng.Stop(context.Background())
+	})
 }

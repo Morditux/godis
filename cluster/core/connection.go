@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/hdt3213/godis/config"
 	"github.com/hdt3213/godis/datastruct/dict"
@@ -37,6 +38,10 @@ type peerStream interface {
 
 type defaultClientFactory struct {
 	nodeConnections dict.Dict // map[string]*pool.Pool
+	// createMu serializes pool creation: BorrowPeerClient checks-then-acts
+	// on nodeConnections, so two borrows of the same peer could each create
+	// a pool, with the loser and its clients leaking
+	createMu sync.Mutex
 }
 
 var connectionPoolConfig = pool.Config{
@@ -46,7 +51,7 @@ var connectionPoolConfig = pool.Config{
 
 func NewFactory() ConnectionFactory {
 	return &defaultClientFactory{
-		nodeConnections: dict.MakeSimple(),
+		nodeConnections: dict.MakeConcurrent(1),
 	}
 }
 
@@ -67,10 +72,13 @@ func (factory *defaultClientFactory) NewPeerClient(peerAddr string) (peerClient,
 	return c, nil
 }
 
-// GetPeerClient gets a client with peer form pool
+// BorrowPeerClient borrows the connection pool for the peer and takes a client from it
 func (factory *defaultClientFactory) BorrowPeerClient(peerAddr string) (peerClient, error) {
-	var connectionPool *pool.Pool
+	// hold createMu around creation to keep the check-then-act atomic;
+	// the fast path (pool exists) only takes it briefly
+	factory.createMu.Lock()
 	raw, ok := factory.nodeConnections.Get(peerAddr)
+	var connectionPool *pool.Pool
 	if !ok {
 		creator := func() (interface{}, error) {
 			return factory.NewPeerClient(peerAddr)
@@ -90,6 +98,7 @@ func (factory *defaultClientFactory) BorrowPeerClient(peerAddr string) (peerClie
 	} else {
 		connectionPool = raw.(*pool.Pool)
 	}
+	factory.createMu.Unlock()
 	raw, err := connectionPool.Get()
 	if err != nil {
 		return nil, err

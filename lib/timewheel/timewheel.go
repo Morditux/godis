@@ -118,8 +118,12 @@ func (tw *TimeWheel) tickHandler() {
 }
 
 func (tw *TimeWheel) scanAndRunTask(l *list.List) {
+	// take the write lock: this function removes elements from the shared slot
+	// lists and mutates task.circle, both of which are not safe under RLock
+	// when several ticks may overlap
 	var tasksToRemove []string
-	tw.mu.RLock() // Read lock for accessing the list
+	var jobs []func()
+	tw.mu.Lock()
 	for e := l.Front(); e != nil; {
 		task := e.Value.(*task)
 		if task.circle > 0 {
@@ -127,24 +131,17 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 			e = e.Next()
 			continue
 		}
-
-		go func(job func()) {
-			defer func() {
-				if err := recover(); err != nil {
-					logger.Error(err)
-				}
-			}()
-			job()
-		}(task.job)
-
+		if task.job != nil {
+			jobs = append(jobs, task.job)
+		}
 		if task.key != "" {
 			tasksToRemove = append(tasksToRemove, task.key)
 		}
 		next := e.Next()
-		l.Remove(e) // Safe as this is a local operation
+		l.Remove(e)
 		e = next
 	}
-	tw.mu.RUnlock()
+	tw.mu.Unlock()
 
 	// Remove tasks from the timer after the scan
 	tw.mu.Lock()
@@ -152,6 +149,17 @@ func (tw *TimeWheel) scanAndRunTask(l *list.List) {
 		delete(tw.timer, key)
 	}
 	tw.mu.Unlock()
+
+	for _, job := range jobs {
+		go func(job func()) {
+			defer func() {
+				if err := recover(); err != nil {
+					logger.Error(err)
+				}
+			}()
+			job()
+		}(job)
+	}
 }
 
 func (tw *TimeWheel) addTask(task *task) {

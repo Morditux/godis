@@ -36,6 +36,11 @@ type Handler struct {
 
 // MakeHandler creates a Handler instance
 func MakeHandler() *Handler {
+	// expose the tcp client counter to the INFO command without making
+	// the database package depend on the transport layer
+	database.ClientCountFunc = func() int64 {
+		return int64(tcp.LoadClientCounter())
+	}
 	var db idatabase.DB
 	if config.Properties.ClusterEnable {
 		db = cluster.MakeCluster()

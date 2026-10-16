@@ -5,12 +5,17 @@ import (
 	"github.com/hdt3213/godis/config"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/redis/protocol"
-	"github.com/hdt3213/godis/tcp"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 )
+
+// ClientCountFunc returns the number of clients connected to the server, used
+// by the INFO command. Server packages (std/gnet) install their own
+// implementation at startup so that the database package does not depend on
+// the transport layer. Implementations must be goroutine-safe.
+var ClientCountFunc = func() int64 { return 0 }
 
 // Ping the server
 func Ping(c redis.Connection, args [][]byte) redis.Reply {
@@ -125,7 +130,7 @@ func GenGodisInfoString(section string, db *Server) []byte {
 			//"client_recent_max_input_buffer:%d\r\n"+
 			//"client_recent_max_output_buffer:%d\r\n"+
 			//"blocked_clients:%d\n",
-			tcp.ClientCounter,
+			ClientCountFunc(),
 			//TODO,
 			//TODO,
 			//TODO,

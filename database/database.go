@@ -14,7 +14,11 @@ import (
 )
 
 const (
-	dataDictSize = 1 << 16
+	// dataDictSize is the number of shards of the data/version dicts per db.
+	// 8192 gives negligible lock contention at ~130B/shard: 2M mutexes (1<<16
+	// shards) cost ~280MB per server, mostly mutex memory which also
+	// balloons the -race shadow state
+	dataDictSize = 1 << 13
 	ttlDictSize  = 1 << 10
 )
 

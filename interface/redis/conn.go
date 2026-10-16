@@ -21,6 +21,8 @@ type Connection interface {
 	EnqueueCmd([][]byte)
 	ClearQueuedCmds()
 	GetWatching() map[string]uint32
+	// SetWatching adds a key to the watched keys with its version
+	SetWatching(key string, version uint32)
 	AddTxError(err error)
 	GetTxErrors() []error
 

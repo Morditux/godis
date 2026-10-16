@@ -96,13 +96,14 @@ func NewPersister(db database.DBEngine, filename string, load bool, fsync string
 	persister.aofChan = make(chan *payload, aofQueueSize)
 	persister.aofFinished = make(chan struct{})
 	persister.listeners = make(map[Listener]struct{})
+	// create ctx BEFORE starting the goroutine: listenCmd reads ctx.Done()
+	ctx, cancel := context.WithCancel(context.Background())
+	persister.ctx = ctx
+	persister.cancel = cancel
 	// start aof goroutine to write aof file in background and fsync periodically if needed (see fsyncEverySecond)
 	go func() {
 		persister.listenCmd()
 	}()
-	ctx, cancel := context.WithCancel(context.Background())
-	persister.ctx = ctx
-	persister.cancel = cancel
 	// fsync every second if needed
 	if persister.aofFsync == FsyncEverySec {
 		persister.fsyncEverySecond()

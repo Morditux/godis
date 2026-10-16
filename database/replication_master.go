@@ -32,13 +32,6 @@ runs `masterTryPartialSyncWithSlave` if cannot go partial sync, go to `masterFul
 */
 
 const (
-	slaveStateHandShake = uint8(iota)
-	slaveStateWaitSaveEnd
-	slaveStateSendingRDB
-	slaveStateOnline
-)
-
-const (
 	bgSaveIdle = uint8(iota)
 	bgSaveRunning
 	bgSaveFinish
@@ -52,8 +45,11 @@ const (
 
 // slaveClient stores slave status in the view of master
 type slaveClient struct {
-	conn         redis.Connection
-	state        uint8
+	conn redis.Connection
+	// mu guards offset/lastAckTime: the REPLCONF ACK handler updates them
+	// concurrently with masterSendUpdatesToSlave, which must not hold
+	// masterStatus.mu while writing to slave connections
+	mu           sync.Mutex
 	offset       int64
 	lastAckTime  time.Time
 	announceIp   string
@@ -135,7 +131,7 @@ func (server *Server) saveForReplication() error {
 	if err != nil {
 		return err
 	}
-	aofListener.readyToSend = true
+	aofListener.readyToSend.Set(true)
 
 	// change bgSaveState and get waitSlaves for sending
 	waitSlaves := make(map[*slaveClient]struct{})
@@ -187,9 +183,10 @@ func (server *Server) rewriteRDB() error {
 	server.persister.RemoveListener(server.masterStatus.aofListener)
 	server.masterStatus.aofListener = aofListener
 	server.masterStatus.mu.Unlock()
-	// It is ok to know that new backlog is ready later, so we change readyToSend without sync
-	// But setting readyToSend=true must after new backlog is really ready (that means master.mu.Unlock)
-	aofListener.readyToSend = true
+	// setting readyToSend=true must happen after the new backlog is really
+	// ready (that means masterStatus.mu.Unlock above); reading it from the
+	// aof goroutine races otherwise, so it stays an atomic flag
+	aofListener.readyToSend.Set(true)
 	return nil
 }
 
@@ -207,7 +204,6 @@ func (server *Server) masterFullReSyncWithSlave(slave *slaveClient) error {
 	if err != nil {
 		return fmt.Errorf("open rdb file %s for replication error: %v", server.masterStatus.rdbFilename, err)
 	}
-	slave.state = slaveStateSendingRDB
 	rdbInfo, _ := os.Stat(server.masterStatus.rdbFilename)
 	rdbSize := rdbInfo.Size()
 	rdbHeader := "$" + strconv.FormatInt(rdbSize, 10) + protocol.CRLF
@@ -278,14 +274,18 @@ func (server *Server) masterSendUpdatesToSlave() error {
 	}
 	server.masterStatus.mu.RUnlock()
 	for slave := range onlineSlaves {
+		slave.mu.Lock()
 		slaveBeginOffset := slave.offset - beginOffset
+		slave.mu.Unlock()
 		_, err := slave.conn.Write(backlog[slaveBeginOffset:])
 		if err != nil {
 			logger.Errorf("send updates backlog to slave failed: %v", err)
 			server.removeSlave(slave)
 			continue
 		}
+		slave.mu.Lock()
 		slave.offset = currentOffset
+		slave.mu.Unlock()
 	}
 	return nil
 }
@@ -307,11 +307,9 @@ func (server *Server) execPSync(c redis.Connection, args [][]byte) redis.Reply {
 		server.masterStatus.slaveMap[c] = slave
 	}
 	if server.masterStatus.bgSaveState == bgSaveIdle {
-		slave.state = slaveStateWaitSaveEnd
 		server.masterStatus.waitSlaves[slave] = struct{}{}
 		server.bgSaveForReplication()
 	} else if server.masterStatus.bgSaveState == bgSaveRunning {
-		slave.state = slaveStateWaitSaveEnd
 		server.masterStatus.waitSlaves[slave] = struct{}{}
 	} else if server.masterStatus.bgSaveState == bgSaveFinish {
 		go func() {
@@ -356,8 +354,14 @@ func (server *Server) execReplConf(c redis.Connection, args [][]byte) redis.Repl
 			if err != nil {
 				return protocol.MakeErrReply("ERR value is not an integer or out of range")
 			}
+			if slave == nil {
+				// ACK from a connection that never performed PSYNC
+				return protocol.MakeErrReply("ERR no PSYNC session for this connection")
+			}
+			slave.mu.Lock()
 			slave.offset = offset
 			slave.lastAckTime = time.Now()
+			slave.mu.Unlock()
 			return &protocol.NoReply{}
 		}
 	}
@@ -377,8 +381,9 @@ func (server *Server) removeSlave(slave *slaveClient) {
 func (server *Server) setSlaveOnline(slave *slaveClient, currentOffset int64) {
 	server.masterStatus.mu.Lock()
 	defer server.masterStatus.mu.Unlock()
-	slave.state = slaveStateOnline
+	slave.mu.Lock()
 	slave.offset = currentOffset
+	slave.mu.Unlock()
 	server.masterStatus.onlineSlaves[slave] = struct{}{}
 }
 
@@ -416,7 +421,7 @@ func (server *Server) masterCron() {
 type replAofListener struct {
 	mdb         *Server
 	backlog     *replBacklog // may NOT be mdb.masterStatus.backlog
-	readyToSend bool
+	readyToSend atomic.Boolean
 }
 
 func (listener *replAofListener) Callback(cmdLines []CmdLine) {
@@ -428,7 +433,7 @@ func (listener *replAofListener) Callback(cmdLines []CmdLine) {
 	listener.mdb.masterStatus.mu.Unlock()
 	// listener could receive updates generated during rdb saving in progress
 	// Do not send updates to slave before rdb saving is finished
-	if listener.readyToSend {
+	if listener.readyToSend.Get() {
 		if err := listener.mdb.masterSendUpdatesToSlave(); err != nil {
 			logger.Errorf("masterSendUpdatesToSlave after receive aof error: %v", err)
 		}

@@ -89,7 +89,7 @@ func (server *Server) slaveOfNone() {
 	server.slaveStatus.replId = ""
 	server.slaveStatus.replOffset = -1
 	server.slaveStatus.stopSlaveWithMutex()
-	server.role = masterRole
+	atomic.StoreInt32(&server.role, masterRole)
 }
 
 // stopSlaveWithMutex stops in-progress connectWithMaster/fullSync/receiveAOF
@@ -445,8 +445,13 @@ func (server *Server) receiveAOF(ctx context.Context, configVersion int32) error
 }
 
 func (server *Server) slaveCron() {
-	repl := server.slaveStatus
-	if repl.masterConn == nil {
+	// protect masterConn/lastRecvTime against concurrent receiveAOF updates
+	// and stopSlave swaps
+	server.slaveStatus.mutex.Lock()
+	masterConn := server.slaveStatus.masterConn
+	lastRecvTime := server.slaveStatus.lastRecvTime
+	server.slaveStatus.mutex.Unlock()
+	if masterConn == nil {
 		return
 	}
 
@@ -456,7 +461,7 @@ func (server *Server) slaveCron() {
 		replTimeout = time.Duration(config.Properties.ReplTimeout) * time.Second
 	}
 	minLastRecvTime := time.Now().Add(-replTimeout)
-	if repl.lastRecvTime.Before(minLastRecvTime) {
+	if lastRecvTime.Before(minLastRecvTime) {
 		// reconnect with master
 		err := server.reconnectWithMaster()
 		if err != nil {
@@ -465,7 +470,7 @@ func (server *Server) slaveCron() {
 		return
 	}
 	// send ack to master
-	err := repl.sendAck2Master()
+	err := server.slaveStatus.sendAck2Master()
 	if err != nil {
 		logger.Error("send failed " + err.Error())
 	}
@@ -473,10 +478,17 @@ func (server *Server) slaveCron() {
 
 // Send a REPLCONF ACK command to the master to inform it about the current processed offset
 func (repl *slaveStatus) sendAck2Master() error {
+	repl.mutex.Lock()
+	masterConn := repl.masterConn
+	replOffset := repl.replOffset
+	repl.mutex.Unlock()
+	if masterConn == nil {
+		return nil
+	}
 	psyncCmdLine := utils.ToCmdLine("REPLCONF", "ACK",
-		strconv.FormatInt(repl.replOffset, 10))
+		strconv.FormatInt(replOffset, 10))
 	psyncReq := protocol.MakeMultiBulkReply(psyncCmdLine)
-	_, err := repl.masterConn.Write(psyncReq.ToBytes())
+	_, err := masterConn.Write(psyncReq.ToBytes())
 	// logger.Info("send ack to master")
 	return err
 }

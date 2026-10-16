@@ -110,12 +110,16 @@ func NewFileLogger(settings *Settings) (*Logger, error) {
 				time.Now().Format(settings.TimeFormat),
 				settings.Ext)
 			if path.Join(settings.Path, logFilename) != logger.logFile.Name() {
-				logFile, err := mustOpen(logFilename, settings.Path)
+				next, err := mustOpen(logFilename, settings.Path)
 				if err != nil {
-					panic("open log " + logFilename + " failed: " + err.Error())
+					// never stop the service or drop the entry because of
+					// a rotation failure: keep writing to the current file
+					_ = logger.logger.Output(0, "[ERROR][logger] open log "+logFilename+" failed: "+err.Error())
+				} else {
+					_ = logger.logFile.Close() // release the previous file
+					logger.logFile = next
+					logger.logger = log.New(io.MultiWriter(os.Stdout, next), "", flags)
 				}
-				logger.logFile = logFile
-				logger.logger = log.New(io.MultiWriter(os.Stdout, logFile), "", flags)
 			}
 			_ = logger.logger.Output(0, e.msg) // msg includes call stack, no need for calldepth
 			logger.entryPool.Put(e)
@@ -146,6 +150,19 @@ func (logger *Logger) Output(level LogLevel, callerDepth int, msg string) {
 	entry.msg = formattedMsg
 	entry.level = level
 	logger.entryChan <- entry
+}
+
+// logSync writes the formatted message directly, bypassing the async queue.
+// callerDepth=2 refers to the caller of logSync
+func (logger *Logger) logSync(level LogLevel, msg string) {
+	var formattedMsg string
+	_, file, line, ok := runtime.Caller(2)
+	if ok {
+		formattedMsg = fmt.Sprintf("[%s][%s:%d] %s", levelFlags[level], filepath.Base(file), line, msg)
+	} else {
+		formattedMsg = fmt.Sprintf("[%s] %s", levelFlags[level], msg)
+	}
+	_ = logger.logger.Output(0, formattedMsg)
 }
 
 // Debug logs debug message through DefaultLogger
@@ -190,8 +207,14 @@ func Errorf(format string, v ...interface{}) {
 	DefaultLogger.Output(ERROR, defaultCallerDepth, msg)
 }
 
-// Fatal prints error message then stop the program
+// Fatal prints the error message synchronously (OS exit would drop entries
+// still buffered in the async consumer) then stops the program
 func Fatal(v ...interface{}) {
 	msg := fmt.Sprintln(v...)
-	DefaultLogger.Output(FATAL, defaultCallerDepth, msg)
+	if fl, ok := DefaultLogger.(*Logger); ok {
+		fl.logSync(FATAL, msg)
+	} else {
+		DefaultLogger.Output(FATAL, defaultCallerDepth, msg)
+	}
+	os.Exit(1)
 }

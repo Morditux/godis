@@ -82,7 +82,7 @@ func TestClientCounter(t *testing.T) {
 	}
 
 	time.Sleep(3 * time.Second)
-	if ClientCounter != 0 {
-		t.Errorf("client counter error: %d", ClientCounter)
+	if LoadClientCounter() != 0 {
+		t.Errorf("client counter error: %d", LoadClientCounter())
 	}
 }

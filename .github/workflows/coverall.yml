@@ -19,7 +19,7 @@ jobs:
 
     - uses: zhulik/redis-action@1.1.0
       with:
-        redis version: '5'
+        redis-version: '5'
         number of databases: 16
 
     - uses: actions/setup-go@v5
@@ -32,10 +32,8 @@ jobs:
     - name: Vet
       run: go vet ./...
 
-    # TODO: add `-race` after fixing the known data races (rand_string, conn.subs, timewheel, ...)
-
     - name: Test
-      run: go test -v -coverprofile=profile.cov ./...
+      run: go test -race -v -coverprofile=profile.cov ./...
 
     - uses: shogo82148/actions-goveralls@v1
       with:

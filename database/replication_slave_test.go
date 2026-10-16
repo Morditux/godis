@@ -102,8 +102,12 @@ func TestReplicationSlaveSide(t *testing.T) {
 
 	// test reconnect
 	config.Properties.ReplTimeout = 1
-	_ = server.slaveStatus.masterConn.Close()
+	server.slaveStatus.mutex.Lock()
+	if server.slaveStatus.masterConn != nil {
+		_ = server.slaveStatus.masterConn.Close()
+	}
 	server.slaveStatus.lastRecvTime = time.Now().Add(-time.Hour) // mock timeout
+	server.slaveStatus.mutex.Unlock()
 	server.slaveCron()
 	time.Sleep(3 * time.Second)
 	ret = masterCli.Send(utils.ToCmdLine("set", "1", "3"))
