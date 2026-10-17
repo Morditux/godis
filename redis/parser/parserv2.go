@@ -2,6 +2,7 @@ package parser
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -37,9 +38,16 @@ func ParseV2(r io.Reader) ([][]byte, error) {
 	if count < 0 {
 		return nil, nil
 	}
+	if int64(count) > MaxMultiBulkLen {
+		return nil, fmt.Errorf("protocol error: array length %d exceeds limit %d", count, MaxMultiBulkLen)
+	}
 
 	// 读取每个参数
-	result := make([][]byte, count)
+	capacity := count
+	if capacity > 1024 {
+		capacity = 1024
+	}
+	result := make([][]byte, 0, capacity)
 	for i := 0; i < count; i++ {
 		// 读取类型前缀
 		_, err := io.ReadFull(r, buf)
@@ -54,8 +62,11 @@ func ParseV2(r io.Reader) ([][]byte, error) {
 				return nil, err
 			}
 			if strLen < 0 {
-				result[i] = nil // Null Bulk String
+				result = append(result, nil) // Null Bulk String
 				continue
+			}
+			if int64(strLen) > MaxBulkLen {
+				return nil, fmt.Errorf("protocol error: bulk string length %d exceeds limit %d", strLen, MaxBulkLen)
 			}
 
 			data := make([]byte, strLen+2)
@@ -63,7 +74,7 @@ func ParseV2(r io.Reader) ([][]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			result[i] = data[:strLen]
+			result = append(result, data[:strLen])
 
 		// case '+', ':': // Simple String or Integer
 		// 	simpleStr, err := readLine(r)
@@ -103,6 +114,9 @@ func readLine(r io.Reader) ([]byte, error) {
 		_, err := io.ReadFull(r, buf)
 		if err != nil {
 			return nil, err
+		}
+		if len(line) >= MaxInlineLen {
+			return nil, errors.New("protocol error: line too long")
 		}
 
 		switch buf[0] {

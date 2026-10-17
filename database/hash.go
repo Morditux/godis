@@ -1,6 +1,8 @@
 package database
 
 import (
+	"math"
+
 	Dict "github.com/hdt3213/godis/datastruct/dict"
 	"github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
@@ -391,7 +393,7 @@ func execHIncrByFloat(db *DB, args [][]byte) redis.Reply {
 	field := string(args[1])
 	rawDelta := string(args[2])
 	delta, err := strconv.ParseFloat(rawDelta, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(delta) || math.IsInf(delta, 0) {
 		return protocol.MakeErrReply("ERR value is not a valid float")
 	}
 
@@ -403,15 +405,19 @@ func execHIncrByFloat(db *DB, args [][]byte) redis.Reply {
 
 	value, exists := dict.Get(field)
 	if !exists {
-		dict.Put(field, args[2])
+		encoded := []byte(strconv.FormatFloat(delta, 'f', -1, 64))
+		dict.Put(field, encoded)
 		db.addAof(utils.ToCmdLine3("hincrbyfloat", args...))
-		return protocol.MakeBulkReply(args[2])
+		return protocol.MakeBulkReply(encoded)
 	}
 	val, err := strconv.ParseFloat(string(value), 64)
-	if err != nil {
+	if err != nil || math.IsNaN(val) || math.IsInf(val, 0) {
 		return protocol.MakeErrReply("ERR hash value is not a float")
 	}
 	result := val + delta
+	if math.IsNaN(result) || math.IsInf(result, 0) {
+		return protocol.MakeErrReply("ERR increment would produce NaN or Infinity")
+	}
 	resultBytes := []byte(strconv.FormatFloat(result, 'f', -1, 64))
 	dict.Put(field, resultBytes)
 	db.addAof(utils.ToCmdLine3("hincrbyfloat", args...))
@@ -495,28 +501,9 @@ func execHRandField(db *DB, args [][]byte) redis.Reply {
 }
 
 func execHScan(db *DB, args [][]byte) redis.Reply {
-	var count int = 10
-	var pattern string = "*"
-	if len(args) > 2 {
-		for i := 2; i < len(args); i++ {
-			arg := strings.ToLower(string(args[i]))
-			if arg == "count" {
-				count0, err := strconv.Atoi(string(args[i+1]))
-				if err != nil {
-					return &protocol.SyntaxErrReply{}
-				}
-				count = count0
-				i++
-			} else if arg == "match" {
-				pattern = string(args[i+1])
-				i++
-			} else {
-				return &protocol.SyntaxErrReply{}
-			}
-		}
-	}
-	if len(args) < 2 {
-		return &protocol.SyntaxErrReply{}
+	pattern, count, _, errReply := parseScanOptions(args, 2, false)
+	if errReply != nil {
+		return errReply
 	}
 	key := string(args[0])
 	// get entity
@@ -528,7 +515,7 @@ func execHScan(db *DB, args [][]byte) redis.Reply {
 		return &protocol.NullBulkReply{}
 	}
 	cursor, err := strconv.Atoi(string(args[1]))
-	if err != nil {
+	if err != nil || cursor < 0 {
 		return protocol.MakeErrReply("ERR invalid cursor")
 	}
 

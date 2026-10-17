@@ -61,11 +61,7 @@ func execFlushDB(db *DB, args [][]byte) redis.Reply {
 }
 
 // returns the type of entity, including: string, list, hash, set and zset
-func getType(db *DB, key string) string {
-	entity, exists := db.GetEntity(key)
-	if !exists {
-		return "none"
-	}
+func typeOf(entity *database.DataEntity) string {
 	switch entity.Data.(type) {
 	case []byte:
 		return "string"
@@ -79,6 +75,24 @@ func getType(db *DB, key string) string {
 		return "zset"
 	}
 	return ""
+}
+
+func getType(db *DB, key string) string {
+	entity, exists := db.GetEntity(key)
+	if !exists {
+		return "none"
+	}
+	return typeOf(entity)
+}
+
+// getTypeLocked reads the entity with the dict's own read lock. SCAN runs
+// without per-key locks, so it must not use the lock-free GetEntity helper.
+func getTypeLocked(db *DB, key string) string {
+	entity, exists := db.data.Get(key)
+	if !exists || db.IsExpired(key) {
+		return "none"
+	}
+	return typeOf(entity)
 }
 
 // execType returns the type of entity, including: string, list, hash, set and zset
@@ -95,7 +109,8 @@ func execType(db *DB, args [][]byte) redis.Reply {
 func prepareRename(args [][]byte) ([]string, []string) {
 	src := string(args[0])
 	dest := string(args[1])
-	return []string{dest}, []string{src}
+	// RENAME removes src and overwrites dest: both need the write lock.
+	return []string{src, dest}, nil
 }
 
 // execRename a key
@@ -110,12 +125,15 @@ func execRename(db *DB, args [][]byte) redis.Reply {
 	if !ok {
 		return protocol.MakeErrReply("no such key")
 	}
+	if src == dest {
+		// RENAME key key is a no-op in Redis, not a deletion.
+		return &protocol.OkReply{}
+	}
 	rawTTL, hasTTL := db.ttlMap.Get(src)
 	db.PutEntity(dest, entity)
 	db.Remove(src)
+	db.Persist(dest) // destination keeps the source ttl, not its own
 	if hasTTL {
-		db.Persist(src) // clean src and dest with their ttl
-		db.Persist(dest)
 		db.Expire(dest, rawTTL)
 	}
 	db.addAof(utils.ToCmdLine3("rename", args...))
@@ -162,14 +180,19 @@ func execExpire(db *DB, args [][]byte) redis.Reply {
 	if err != nil {
 		return protocol.MakeErrReply("ERR value is not an integer or out of range")
 	}
-	ttl := time.Duration(ttlArg) * time.Second
+	if ttlArg > maxTTLSeconds {
+		return protocol.MakeErrReply(invalidExpireErr("expire"))
+	}
 
 	_, exists := db.GetEntity(key)
 	if !exists {
 		return protocol.MakeIntReply(0)
 	}
 
-	expireAt := time.Now().Add(ttl)
+	expireAt := time.Now()
+	if ttlArg > 0 {
+		expireAt = expireAt.Add(time.Duration(ttlArg) * time.Second)
+	}
 	db.Expire(key, expireAt)
 	db.addAof(aof.MakeExpireCmd(key, expireAt).Args)
 	return protocol.MakeIntReply(1)
@@ -182,6 +205,9 @@ func execExpireAt(db *DB, args [][]byte) redis.Reply {
 	raw, err := strconv.ParseInt(string(args[1]), 10, 64)
 	if err != nil {
 		return protocol.MakeErrReply("ERR value is not an integer or out of range")
+	}
+	if raw > maxUnixSeconds || raw < minUnixSeconds {
+		return protocol.MakeErrReply(invalidExpireErr("expireat"))
 	}
 	expireAt := time.Unix(raw, 0)
 
@@ -218,14 +244,19 @@ func execPExpire(db *DB, args [][]byte) redis.Reply {
 	if err != nil {
 		return protocol.MakeErrReply("ERR value is not an integer or out of range")
 	}
-	ttl := time.Duration(ttlArg) * time.Millisecond
+	if ttlArg > maxTTLMillis {
+		return protocol.MakeErrReply(invalidExpireErr("pexpire"))
+	}
 
 	_, exists := db.GetEntity(key)
 	if !exists {
 		return protocol.MakeIntReply(0)
 	}
 
-	expireAt := time.Now().Add(ttl)
+	expireAt := time.Now()
+	if ttlArg > 0 {
+		expireAt = expireAt.Add(time.Duration(ttlArg) * time.Millisecond)
+	}
 	db.Expire(key, expireAt)
 	db.addAof(aof.MakeExpireCmd(key, expireAt).Args)
 	return protocol.MakeIntReply(1)
@@ -238,6 +269,9 @@ func execPExpireAt(db *DB, args [][]byte) redis.Reply {
 	raw, err := strconv.ParseInt(string(args[1]), 10, 64)
 	if err != nil {
 		return protocol.MakeErrReply("ERR value is not an integer or out of range")
+	}
+	if raw > maxUnixMillis || raw < minUnixMillis {
+		return protocol.MakeErrReply(invalidExpireErr("pexpireat"))
 	}
 	expireAt := time.Unix(0, raw*int64(time.Millisecond))
 
@@ -353,6 +387,46 @@ func undoExpire(db *DB, args [][]byte) []CmdLine {
 	}
 }
 
+// cloneEntity returns a deep copy of entity. COPY must not share the
+// underlying slice/container with the source key: mutating one key through
+// APPEND/LPUSH/HSET used to mutate the other.
+func cloneEntity(entity *database.DataEntity) *database.DataEntity {
+	switch data := entity.Data.(type) {
+	case []byte:
+		return &database.DataEntity{Data: append([]byte(nil), data...)}
+	case list.List[[]byte]:
+		cloned := list.NewQuickList[[]byte]()
+		data.ForEach(func(_ int, v []byte) bool {
+			cloned.Add(append([]byte(nil), v...))
+			return true
+		})
+		return &database.DataEntity{Data: cloned}
+	case dict.Dict[[]byte]:
+		cloned := dict.MakeSimple[[]byte]()
+		data.ForEach(func(field string, v []byte) bool {
+			cloned.Put(field, append([]byte(nil), v...))
+			return true
+		})
+		return &database.DataEntity{Data: cloned}
+	case *set.Set:
+		cloned := set.Make()
+		data.ForEach(func(member string) bool {
+			cloned.Add(member)
+			return true
+		})
+		return &database.DataEntity{Data: cloned}
+	case *sortedset.SortedSet:
+		cloned := sortedset.Make()
+		data.ForEachByRank(0, data.Len(), false, func(element *sortedset.Element) bool {
+			cloned.Add(element.Member, element.Score)
+			return true
+		})
+		return &database.DataEntity{Data: cloned}
+	default:
+		return entity
+	}
+}
+
 // execCopy usage: COPY source destination [DB destination-db] [REPLACE]
 // This command copies the value stored at the source key to the destination key.
 func execCopy(mdb *Server, conn redis.Connection, args [][]byte) redis.Reply {
@@ -391,13 +465,32 @@ func execCopy(mdb *Server, conn redis.Connection, args [][]byte) redis.Reply {
 		return protocol.MakeErrReply("ERR source and destination objects are the same")
 	}
 
+	srcDBIndex := conn.GetDBIndex()
+	srcDB := db
+	destDB := mdb.mustSelectDB(dbIndex)
+	// Lock source and destination. When they live in different databases,
+	// acquire the lower database index first to keep a global order.
+	if srcDBIndex == dbIndex {
+		srcDB.RWLocks([]string{destKey}, []string{srcKey})
+		defer srcDB.RWUnLocks([]string{destKey}, []string{srcKey})
+	} else if srcDBIndex < dbIndex {
+		srcDB.RWLocks(nil, []string{srcKey})
+		defer srcDB.RWUnLocks(nil, []string{srcKey})
+		destDB.RWLocks([]string{destKey}, nil)
+		defer destDB.RWUnLocks([]string{destKey}, nil)
+	} else {
+		destDB.RWLocks([]string{destKey}, nil)
+		defer destDB.RWUnLocks([]string{destKey}, nil)
+		srcDB.RWLocks(nil, []string{srcKey})
+		defer srcDB.RWUnLocks(nil, []string{srcKey})
+	}
+
 	// source key does not exist
 	src, exists := db.GetEntity(srcKey)
 	if !exists {
 		return protocol.MakeIntReply(0)
 	}
 
-	destDB := mdb.mustSelectDB(dbIndex)
 	if _, exists = destDB.GetEntity(destKey); exists != false {
 		// If destKey exists and there is no "replace" option
 		if replaceFlag == false {
@@ -405,8 +498,9 @@ func execCopy(mdb *Server, conn redis.Connection, args [][]byte) redis.Reply {
 		}
 	}
 
-	destDB.PutEntity(destKey, src)
+	destDB.PutEntity(destKey, cloneEntity(src))
 	raw, exists := db.ttlMap.Get(srcKey)
+	destDB.Persist(destKey) // destination inherits the source ttl, not its own
 	if exists {
 		destDB.Expire(destKey, raw)
 	}
@@ -416,32 +510,12 @@ func execCopy(mdb *Server, conn redis.Connection, args [][]byte) redis.Reply {
 
 // execScan return the result of the scan
 func execScan(db *DB, args [][]byte) redis.Reply {
-	var count int = 10
-	var pattern string = "*"
-	var scanType string = ""
-	if len(args) > 1 {
-		for i := 1; i < len(args); i++ {
-			arg := strings.ToLower(string(args[i]))
-			if arg == "count" {
-				count0, err := strconv.Atoi(string(args[i+1]))
-				if err != nil {
-					return &protocol.SyntaxErrReply{}
-				}
-				count = count0
-				i++
-			} else if arg == "match" {
-				pattern = string(args[i+1])
-				i++
-			} else if arg == "type" {
-				scanType = strings.ToLower(string(args[i+1]))
-				i++
-			} else {
-				return &protocol.SyntaxErrReply{}
-			}
-		}
+	pattern, count, scanType, errReply := parseScanOptions(args, 1, true)
+	if errReply != nil {
+		return errReply
 	}
 	cursor, err := strconv.Atoi(string(args[0]))
-	if err != nil {
+	if err != nil || cursor < 0 {
 		return protocol.MakeErrReply("ERR invalid cursor")
 	}
 	keysReply, nextCursor := db.data.DictScan(cursor, count, pattern)
@@ -453,7 +527,7 @@ func execScan(db *DB, args [][]byte) redis.Reply {
 		// filter in place, O(n) instead of O(n^2) element moves
 		n := 0
 		for _, key := range keysReply {
-			if getType(db, string(key)) == scanType {
+			if getTypeLocked(db, string(key)) == scanType {
 				keysReply[n] = key
 				n++
 			}

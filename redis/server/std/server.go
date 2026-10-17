@@ -59,15 +59,23 @@ func MakeHandler() *Handler {
 }
 
 func Serve(addr string, handler *Handler) error {
+	maxConnect := uint32(0)
+	if config.Properties.MaxClients > 0 {
+		maxConnect = uint32(config.Properties.MaxClients)
+	}
 	return tcp.ListenAndServeWithSignal(&tcp.Config{
-		Address: addr,
+		Address:    addr,
+		MaxConnect: maxConnect,
 	}, handler)
 }
 
 func (h *Handler) closeClient(client *connection.Connection) {
-	_ = client.Close()
-	h.db.AfterClientClose(client)
+	// remove the connection from the tracking table and unsubscribe it before
+	// Close returns it to the connection pool; otherwise another goroutine can
+	// recycle the same object and this cleanup would operate on the new owner.
 	h.activeConn.Delete(client)
+	h.db.AfterClientClose(client)
+	_ = client.Close()
 }
 
 // Handle receives and executes redis commands
@@ -106,18 +114,23 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 				payload.Err == io.ErrUnexpectedEOF ||
 				strings.Contains(payload.Err.Error(), "use of closed network connection") {
 				// connection closed, flush pending replies first
-				flush()
+				if !flush() {
+					return
+				}
 				h.closeClient(client)
 				logger.Info("connection closed: " + client.RemoteAddr())
 				return
 			}
-			// protocol err
-			errReply := protocol.MakeErrReply(payload.Err.Error())
-			out.Write(errReply.ToBytes())
-			if out.Len() >= handleFlushThreshold && !flush() {
-				return
+			// Protocol error (including an oversized RESP frame): send the
+			// error, flush it, then close. The parser stops after a protocol
+			// error, so continuing would desynchronize the stream and leak the
+			// client tracking entry.
+			logger.Infof("protocol error from %s: %v", client.RemoteAddr(), payload.Err)
+			out.Write(protocol.MakeErrReply(payload.Err.Error()).ToBytes())
+			if flush() {
+				h.closeClient(client)
 			}
-			continue
+			return
 		}
 		if payload.Data == nil {
 			logger.Error("empty payload")
@@ -151,7 +164,7 @@ func (h *Handler) Close() error {
 	// TODO: concurrent wait
 	h.activeConn.Range(func(key interface{}, val interface{}) bool {
 		client := key.(*connection.Connection)
-		_ = client.Close()
+		h.closeClient(client)
 		return true
 	})
 	h.db.Close()

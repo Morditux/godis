@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -79,6 +80,52 @@ func (p *ServerProperties) RaftAnnounceAddress() string {
 	return p.RaftListenAddr
 }
 
+// resolvePath resolves a filename relative to the configured working
+// directory. Absolute paths and the empty string are returned unchanged.
+func (p *ServerProperties) resolvePath(filename string) string {
+	if filename == "" || filepath.IsAbs(filename) {
+		return filename
+	}
+	dir := p.Dir
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, filename)
+}
+
+// AofPath returns the effective path of the append-only file.
+func (p *ServerProperties) AofPath() string {
+	return p.resolvePath(p.AppendFilename)
+}
+
+// RdbPath returns the effective path of the configured RDB file, or "" when
+// no RDB filename is configured.
+func (p *ServerProperties) RdbPath() string {
+	return p.resolvePath(p.RDBFilename)
+}
+
+// DumpPath returns the path used by SAVE/BGSAVE, defaulting to dump.rdb.
+func (p *ServerProperties) DumpPath() string {
+	if p.RDBFilename == "" {
+		return p.resolvePath("dump.rdb")
+	}
+	return p.resolvePath(p.RDBFilename)
+}
+
+func defaultProperties() *ServerProperties {
+	return &ServerProperties{
+		Bind:              "127.0.0.1",
+		Port:              6379,
+		Databases:         16,
+		MaxClients:        1000,
+		AppendFilename:    "appendonly.aof",
+		AppendFsync:       "everysec",
+		SlowLogSlowerThan: 10000,
+		SlowLogMaxLen:     128,
+		RunID:             utils.RandString(40),
+	}
+}
+
 // Properties holds global config properties
 var Properties *ServerProperties
 var EachTimeServerInfo *ServerInfo
@@ -90,40 +137,91 @@ func init() {
 	}
 
 	// default config
-	Properties = &ServerProperties{
-		Bind:       "127.0.0.1",
-		Port:       6379,
-		AppendOnly: false,
-		RunID:      utils.RandString(40),
+	Properties = defaultProperties()
+}
+
+func parseBool(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "yes", "true", "1", "on":
+		return true, true
+	case "no", "false", "0", "off":
+		return false, true
+	default:
+		return false, false
 	}
 }
 
-func parse(src io.Reader) *ServerProperties {
-	config := &ServerProperties{}
+func validateProperties(p *ServerProperties) error {
+	if p.Port < 1 || p.Port > 65535 {
+		return fmt.Errorf("invalid port %d: must be between 1 and 65535", p.Port)
+	}
+	if p.Databases <= 0 {
+		return fmt.Errorf("invalid databases %d: must be greater than 0", p.Databases)
+	}
+	if p.MaxClients < 0 {
+		return fmt.Errorf("invalid maxclients %d: must not be negative", p.MaxClients)
+	}
+	if p.MaxClients > 1<<31-1 {
+		return fmt.Errorf("invalid maxclients %d: too large", p.MaxClients)
+	}
+	if p.ReplTimeout < 0 {
+		return fmt.Errorf("invalid repl-timeout %d: must not be negative", p.ReplTimeout)
+	}
+	if p.SlowLogMaxLen < 0 {
+		return fmt.Errorf("invalid slowlog-max-len %d: must not be negative", p.SlowLogMaxLen)
+	}
+	switch strings.ToLower(p.AppendFsync) {
+	case "always", "everysec", "no":
+		p.AppendFsync = strings.ToLower(p.AppendFsync)
+	default:
+		return fmt.Errorf("invalid appendfsync %q: must be always, everysec or no", p.AppendFsync)
+	}
+	if p.AppendOnly && p.AppendFilename == "" {
+		p.AppendFilename = "appendonly.aof"
+	}
+	if p.Dir == "" {
+		p.Dir = "."
+	}
+	return nil
+}
+
+// parse starts from the built-in defaults instead of a zero-valued struct:
+// a config file that only overrides one option must not reset bind to "" or
+// port to 0 (which made the server listen on ":0" on every interface).
+func parse(src io.Reader) (*ServerProperties, error) {
+	config := defaultProperties()
 
 	// read config file
 	rawMap := make(map[string]string)
 	scanner := bufio.NewScanner(src)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if len(line) > 0 && strings.TrimLeft(line, " ")[0] == '#' {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		pivot := strings.IndexAny(line, " ")
-		if pivot > 0 && pivot < len(line)-1 { // separator found
-			key := line[0:pivot]
-			value := strings.Trim(line[pivot+1:], " ")
-			rawMap[strings.ToLower(key)] = value
+		pivot := strings.IndexAny(line, " \t")
+		if pivot <= 0 || pivot >= len(line)-1 {
+			logger.Warn("ignore malformed config line: " + line)
+			continue
 		}
+		key := strings.ToLower(strings.TrimSpace(line[0:pivot]))
+		value := strings.TrimSpace(line[pivot+1:])
+		if key == "" || value == "" {
+			logger.Warn("ignore malformed config line: " + line)
+			continue
+		}
+		rawMap[key] = value
 	}
 	if err := scanner.Err(); err != nil {
-		logger.Fatal(err)
+		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
 	// parse format
 	t := reflect.TypeOf(config)
 	v := reflect.ValueOf(config)
 	n := t.Elem().NumField()
+	recognized := make(map[string]struct{}, n)
 	for i := 0; i < n; i++ {
 		field := t.Elem().Field(i)
 		fieldVal := v.Elem().Field(i)
@@ -131,54 +229,70 @@ func parse(src io.Reader) *ServerProperties {
 		if !ok || strings.TrimLeft(key, " ") == "" {
 			key = field.Name
 		}
-		value, ok := rawMap[strings.ToLower(key)]
-		if ok {
-			// fill config
-			switch field.Type.Kind() {
-			case reflect.String:
-				fieldVal.SetString(value)
-			case reflect.Int:
-				intValue, err := strconv.ParseInt(value, 10, 64)
-				if err == nil {
-					fieldVal.SetInt(intValue)
-				}
-			case reflect.Int64:
-				intValue, err := strconv.ParseInt(value, 10, 64)
-				if err == nil {
-					fieldVal.SetInt(intValue)
-				}
-			case reflect.Bool:
-				boolValue := "yes" == value
-				fieldVal.SetBool(boolValue)
-			case reflect.Slice:
-				if field.Type.Elem().Kind() == reflect.String {
-					slice := strings.Split(value, ",")
-					fieldVal.Set(reflect.ValueOf(slice))
-				}
+		key = strings.ToLower(key)
+		recognized[key] = struct{}{}
+		value, ok := rawMap[key]
+		if !ok {
+			continue
+		}
+		switch field.Type.Kind() {
+		case reflect.String:
+			fieldVal.SetString(value)
+		case reflect.Int, reflect.Int64:
+			intValue, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				logger.Warn(fmt.Sprintf("invalid value for %s: %q (keeping default %v)", key, value, fieldVal.Interface()))
+				continue
+			}
+			fieldVal.SetInt(intValue)
+		case reflect.Bool:
+			boolValue, ok := parseBool(value)
+			if !ok {
+				logger.Warn(fmt.Sprintf("invalid boolean for %s: %q (keeping default %v)", key, value, fieldVal.Interface()))
+				continue
+			}
+			fieldVal.SetBool(boolValue)
+		case reflect.Slice:
+			if field.Type.Elem().Kind() == reflect.String {
+				slice := strings.Split(value, ",")
+				fieldVal.Set(reflect.ValueOf(slice))
 			}
 		}
 	}
-	return config
+	for key := range rawMap {
+		if _, ok := recognized[key]; !ok {
+			logger.Warn("unknown config key: " + key)
+		}
+	}
+	if err := validateProperties(config); err != nil {
+		return nil, err
+	}
+	return config, nil
 }
 
-// SetupConfig read config file and store properties into Properties
-func SetupConfig(configFilename string) {
+// SetupConfig read config file and store properties into Properties.
+// It returns an error instead of panicking so that main can exit with a
+// non-zero status and a clear message.
+func SetupConfig(configFilename string) error {
 	file, err := os.Open(configFilename)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("open config file %q: %w", configFilename, err)
 	}
 	defer file.Close()
-	Properties = parse(file)
-	Properties.RunID = utils.RandString(40)
-	configFilePath, err = filepath.Abs(configFilename)
+	properties, err := parse(file)
 	if err != nil {
-		return
+		return fmt.Errorf("parse config file %q: %w", configFilename, err)
 	}
-	if Properties.Dir == "" {
-		Properties.Dir = "."
+	properties.RunID = utils.RandString(40)
+	Properties = properties
+	if abs, err := filepath.Abs(configFilename); err == nil {
+		configFilePath = abs
+	} else {
+		logger.Warn("resolve config path failed: " + err.Error())
 	}
+	return nil
 }
 
 func GetTmpDir() string {
-	return Properties.Dir + "/tmp"
+	return filepath.Join(Properties.Dir, "tmp")
 }

@@ -393,11 +393,11 @@ func (server *Server) loadMasterRDB(configVersion int32) error {
 	if config.Properties.AppendOnly {
 		// use new aof file
 		server.persister.Close()
-		err = os.Rename(newAofFilename, config.Properties.AppendFilename)
+		err = os.Rename(newAofFilename, config.Properties.AofPath())
 		if err != nil {
 			return err
 		}
-		persister, err := NewPersister(server, config.Properties.AppendFilename, false, config.Properties.AppendFsync)
+		persister, err := NewPersister(server, config.Properties.AofPath(), false, config.Properties.AppendFsync)
 		if err != nil {
 			return err
 		}

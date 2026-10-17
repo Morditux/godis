@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"runtime/debug"
 	"strconv"
@@ -35,6 +36,38 @@ func ParseStream(reader io.Reader) <-chan *Payload {
 // its consumer. The consumer of the server uses the channel fill level to
 // batch replies, so this also enables batching under pipelining.
 const parseStreamChanSize = 64
+
+// Protocol limits. These mirror Redis's proto-max-bulk-len (512 MiB) and a
+// conservative multi-bulk limit. Without them a single client could ask the
+// server to allocate an arbitrary amount of memory ("$<huge>" or "*<huge>").
+var (
+	MaxBulkLen      int64 = 512 << 20
+	MaxMultiBulkLen int64 = 1 << 20
+	MaxInlineLen          = 64 << 10
+	MaxRDBLen       int64 = 4 << 30
+)
+
+var errLineTooLong = errors.New("protocol error: line too long")
+
+// readLine reads a CRLF-terminated line with a bounded allocation. Using
+// bufio.Reader.ReadBytes would allocate the whole line before any size check.
+func readLineBounded(reader *bufio.Reader) ([]byte, error) {
+	line := make([]byte, 0, 64)
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > MaxInlineLen {
+			return nil, errLineTooLong
+		}
+		line = append(line, fragment...)
+		if err == nil {
+			return line, nil
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		return nil, err
+	}
+}
 
 // ParseStreamWithStop behaves like ParseStream and accepts a stop channel.
 // Passing nil is equivalent to ParseStream.
@@ -111,7 +144,7 @@ func parse0(rawReader io.Reader, ch chan<- *Payload, stop <-chan struct{}) {
 	}()
 	reader := bufio.NewReader(rawReader)
 	for {
-		line, err := reader.ReadBytes('\n')
+		line, err := readLineBounded(reader)
 		if err != nil {
 			// reader error/EOF: deliver it and terminate, closing the channel
 			_ = send0(ch, stop, &Payload{Err: err})
@@ -174,9 +207,12 @@ func parse0(rawReader io.Reader, ch chan<- *Payload, stop <-chan struct{}) {
 func parseBulkString(header []byte, reader *bufio.Reader, ch chan<- *Payload, stop <-chan struct{}) error {
 	strLen, err := strconv.ParseInt(string(header[1:]), 10, 64)
 	if err != nil || strLen < -1 {
-		protocolError(ch, stop, "illegal bulk string header: "+string(header))
-		return nil
-	} else if strLen == -1 {
+		return fmt.Errorf("protocol error: illegal bulk string header: %s", header)
+	}
+	if strLen > MaxBulkLen {
+		return fmt.Errorf("protocol error: bulk string length %d exceeds limit %d", strLen, MaxBulkLen)
+	}
+	if strLen == -1 {
 		if !send0(ch, stop, &Payload{Data: protocol.MakeNullBulkReply()}) {
 			return nil
 		}
@@ -195,7 +231,7 @@ func parseBulkString(header []byte, reader *bufio.Reader, ch chan<- *Payload, st
 
 // there is no CRLF between RDB and following AOF, therefore it needs to be treated differently
 func parseRDBBulkString(reader *bufio.Reader, ch chan<- *Payload, stop <-chan struct{}) error {
-	header, err := reader.ReadBytes('\n')
+	header, err := readLineBounded(reader)
 	if err != nil {
 		return errors.New("failed to read bytes")
 	}
@@ -206,6 +242,9 @@ func parseRDBBulkString(reader *bufio.Reader, ch chan<- *Payload, stop <-chan st
 	strLen, err := strconv.ParseInt(string(header[1:]), 10, 64)
 	if err != nil || strLen <= 0 {
 		return errors.New("illegal bulk header: " + string(header))
+	}
+	if strLen > MaxRDBLen {
+		return fmt.Errorf("protocol error: rdb length %d exceeds limit %d", strLen, MaxRDBLen)
 	}
 	body := make([]byte, strLen)
 	_, err = io.ReadFull(reader, body)
@@ -221,31 +260,40 @@ func parseRDBBulkString(reader *bufio.Reader, ch chan<- *Payload, stop <-chan st
 func parseArray(header []byte, reader *bufio.Reader, ch chan<- *Payload, stop <-chan struct{}) error {
 	nStrs, err := strconv.ParseInt(string(header[1:]), 10, 64)
 	if err != nil || nStrs < 0 {
-		protocolError(ch, stop, "illegal array header "+string(header[1:]))
-		return nil
-	} else if nStrs == 0 {
+		return fmt.Errorf("protocol error: illegal array header %s", header[1:])
+	}
+	if nStrs > MaxMultiBulkLen {
+		return fmt.Errorf("protocol error: array length %d exceeds limit %d", nStrs, MaxMultiBulkLen)
+	}
+	if nStrs == 0 {
 		if !send0(ch, stop, &Payload{Data: protocol.MakeEmptyMultiBulkReply()}) {
 			return nil
 		}
 		return nil
 	}
-	lines := make([][]byte, 0, nStrs)
+	capacity := int64(1024)
+	if nStrs < capacity {
+		capacity = nStrs
+	}
+	lines := make([][]byte, 0, capacity)
 	for i := int64(0); i < nStrs; i++ {
 		var line []byte
-		line, err = reader.ReadBytes('\n')
+		line, err = readLineBounded(reader)
 		if err != nil {
 			return err
 		}
 		length := len(line)
 		if length < 4 || line[length-2] != '\r' || line[0] != '$' {
-			protocolError(ch, stop, "illegal bulk string header "+string(line))
-			break
+			return fmt.Errorf("protocol error: illegal bulk string header %s", line)
 		}
 		strLen, err := strconv.ParseInt(string(line[1:length-2]), 10, 64)
 		if err != nil || strLen < -1 {
-			protocolError(ch, stop, "illegal bulk string length "+string(line))
-			break
-		} else if strLen == -1 {
+			return fmt.Errorf("protocol error: illegal bulk string length %s", line)
+		}
+		if strLen > MaxBulkLen {
+			return fmt.Errorf("protocol error: bulk string length %d exceeds limit %d", strLen, MaxBulkLen)
+		}
+		if strLen == -1 {
 			lines = append(lines, []byte{})
 		} else {
 			body := make([]byte, strLen+2)

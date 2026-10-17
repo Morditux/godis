@@ -54,15 +54,20 @@ func ListenAndServeWithSignal(cfg *Config, handler tcp.Handler) error {
 	}
 	//cfg.Address = listener.Addr().String()
 	logger.Info(fmt.Sprintf("bind: %s, start listening...", cfg.Address))
-	ListenAndServe(listener, handler, closeChan)
+	listenAndServe(listener, handler, closeChan, cfg.MaxConnect)
 	return nil
 }
 
 // ListenAndServe binds port and handle requests, blocking until close
 func ListenAndServe(listener net.Listener, handler tcp.Handler, closeChan <-chan struct{}) {
+	listenAndServe(listener, handler, closeChan, 0)
+}
+
+// listenAndServe accepts connections until the listener is closed. maxConnect
+// limits the number of simultaneous clients; 0 means unlimited.
+func listenAndServe(listener net.Listener, handler tcp.Handler, closeChan <-chan struct{}, maxConnect uint32) {
 	// listen signal
 	errCh := make(chan error, 1)
-	defer close(errCh)
 	go func() {
 		select {
 		case <-closeChan:
@@ -75,6 +80,15 @@ func ListenAndServe(listener net.Listener, handler tcp.Handler, closeChan <-chan
 		_ = handler.Close()  // close connections
 	}()
 
+	limit := int32(0)
+	if maxConnect > 0 {
+		if maxConnect > 1<<31-1 {
+			limit = 1<<31 - 1
+		} else {
+			limit = int32(maxConnect)
+		}
+	}
+	var active int32
 	ctx := context.Background()
 	var waitDone sync.WaitGroup
 	for {
@@ -91,11 +105,18 @@ func ListenAndServe(listener net.Listener, handler tcp.Handler, closeChan <-chan
 		}
 		// handle
 		// logger.Info("accept link")
+		if limit > 0 && atomic.LoadInt32(&active) >= limit {
+			logger.Warn("max clients reached, refusing connection")
+			_ = conn.Close()
+			continue
+		}
+		atomic.AddInt32(&active, 1)
 		atomic.AddInt32(&ClientCounter, 1)
 		waitDone.Add(1)
 		go func() {
 			defer func() {
 				waitDone.Done()
+				atomic.AddInt32(&active, -1)
 				atomic.AddInt32(&ClientCounter, -1)
 			}()
 			handler.Handle(ctx, conn)

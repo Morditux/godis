@@ -8,7 +8,6 @@ import (
 	"github.com/hdt3213/godis/datastruct/dict"
 	"github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
-	"github.com/hdt3213/godis/lib/logger"
 	"github.com/hdt3213/godis/lib/timewheel"
 	"github.com/hdt3213/godis/redis/protocol"
 )
@@ -168,8 +167,22 @@ func (db *DB) GetEntity(key string) (*database.DataEntity, bool) {
 	return entity, true
 }
 
+// clearExpiredTTL drops an expired ttl before a write installs a fresh value
+// at key. Without it, a key whose deadline passed but whose time-wheel task
+// has not fired yet would keep its old deadline and be deleted right after
+// the write. The caller must hold the write lock of key.
+func (db *DB) clearExpiredTTL(key string) {
+	expireTime, ok := db.ttlMap.Get(key)
+	if !ok || time.Now().Before(expireTime) {
+		return
+	}
+	db.ttlMap.Remove(key)
+	timewheel.Cancel(genExpireTask(key))
+}
+
 // PutEntity a DataEntity into DB
 func (db *DB) PutEntity(key string, entity *database.DataEntity) int {
+	db.clearExpiredTTL(key)
 	ret := db.data.PutWithLock(key, entity)
 	// db.insertCallback may be set as nil, during `if` and actually callback
 	// so introduce a local variable `cb`
@@ -181,11 +194,13 @@ func (db *DB) PutEntity(key string, entity *database.DataEntity) int {
 
 // PutIfExists edit an existing DataEntity
 func (db *DB) PutIfExists(key string, entity *database.DataEntity) int {
+	db.clearExpiredTTL(key)
 	return db.data.PutIfExistsWithLock(key, entity)
 }
 
 // PutIfAbsent insert an DataEntity only if the key not exists
 func (db *DB) PutIfAbsent(key string, entity *database.DataEntity) int {
+	db.clearExpiredTTL(key)
 	ret := db.data.PutIfAbsentWithLock(key, entity)
 	// db.insertCallback may be set as nil, during `if` and actually callback
 	// so introduce a local variable `cb`
@@ -209,14 +224,20 @@ func (db *DB) Remove(key string) {
 	}
 }
 
-// Removes the given keys from db
+// Removes the given keys from db. Expired keys are cleaned but, like Redis,
+// are not reported as deleted.
 func (db *DB) Removes(keys ...string) (deleted int) {
 	deleted = 0
 	for _, key := range keys {
-		_, exists := db.data.GetWithLock(key)
+		_, exists := db.GetEntity(key)
 		if exists {
-			db.Remove(key)
 			deleted++
+		}
+		// also remove expired entries that are still physically present.
+		// GetWithLock does not take the shard lock: callers such as DEL already
+		// hold the write lock for these keys (taking it again would deadlock).
+		if _, ok := db.data.GetWithLock(key); ok {
+			db.Remove(key)
 		}
 	}
 	return deleted
@@ -248,8 +269,13 @@ func genExpireTask(key string) string {
 	return "expire:" + key
 }
 
-// Expire sets ttlCmd of key
+// Expire sets ttlCmd of key. A deadline in the past deletes the key
+// immediately, matching Redis's EXPIRE with a non-positive TTL.
 func (db *DB) Expire(key string, expireTime time.Time) {
+	if !expireTime.After(time.Now()) {
+		db.Remove(key)
+		return
+	}
 	db.ttlMap.Put(key, expireTime)
 	taskKey := genExpireTask(key)
 	timewheel.At(expireTime, taskKey, func() {
@@ -257,13 +283,11 @@ func (db *DB) Expire(key string, expireTime time.Time) {
 		db.RWLocks(keys, nil)
 		defer db.RWUnLocks(keys, nil)
 		// check-lock-check, ttl may be updated during waiting lock
-		logger.Info("expire " + key)
 		expireTime, ok := db.ttlMap.Get(key)
 		if !ok {
 			return
 		}
-		expired := time.Now().After(expireTime)
-		if expired {
+		if time.Now().After(expireTime) {
 			db.Remove(key)
 		}
 	})
@@ -276,17 +300,19 @@ func (db *DB) Persist(key string) {
 	timewheel.Cancel(taskKey)
 }
 
-// IsExpired check whether a key is expired
+// IsExpired reports whether the given key has an expired ttl.
+// It is deliberately read-only: it is called from read commands while the
+// key is protected by a shared lock, so removing the entry here would mutate
+// the data dict under a read lock (two concurrent GETs on an expired key used
+// to crash the process with "concurrent map read and map write"). Physical
+// removal is performed by the expiry time wheel scheduled in Expire, or by
+// clearExpiredTTL when the key is overwritten.
 func (db *DB) IsExpired(key string) bool {
 	expireTime, ok := db.ttlMap.Get(key)
 	if !ok {
 		return false
 	}
-	expired := time.Now().After(expireTime)
-	if expired {
-		db.Remove(key)
-	}
-	return expired
+	return time.Now().After(expireTime)
 }
 
 /* --- add version --- */
@@ -307,9 +333,13 @@ func (db *DB) GetVersion(key string) uint32 {
 	return versionCode
 }
 
-// ForEach traverses all the keys in the database
+// ForEach traverses all the live keys in the database. Expired keys that the
+// time wheel has not collected yet are skipped.
 func (db *DB) ForEach(cb func(key string, data *database.DataEntity, expiration *time.Time) bool) {
 	db.data.ForEach(func(key string, entity *database.DataEntity) bool {
+		if db.IsExpired(key) {
+			return true
+		}
 		var expiration *time.Time
 		expireTime, ok := db.ttlMap.Get(key)
 		if ok {

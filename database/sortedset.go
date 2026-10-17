@@ -51,7 +51,7 @@ func execZAdd(db *DB, args [][]byte) redis.Reply {
 		scoreValue := args[2*i+1]
 		member := string(args[2*i+2])
 		score, err := strconv.ParseFloat(string(scoreValue), 64)
-		if err != nil {
+		if err != nil || math.IsNaN(score) {
 			return protocol.MakeErrReply("ERR value is not a valid float")
 		}
 		elements[i] = &SortedSet.Element{
@@ -454,11 +454,14 @@ func execZRemRangeByScore(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if sortedSet == nil {
-		return &protocol.EmptyMultiBulkReply{}
+		return protocol.MakeIntReply(0)
 	}
 
 	removed := sortedSet.RemoveRange(min, max)
 	if removed > 0 {
+		if sortedSet.Len() == 0 {
+			db.Remove(key)
+		}
 		db.addAof(utils.ToCmdLine3("zremrangebyscore", args...))
 	}
 	return protocol.MakeIntReply(removed)
@@ -510,6 +513,9 @@ func execZRemRangeByRank(db *DB, args [][]byte) redis.Reply {
 	// assert: start in [0, size - 1], stop in [start, size]
 	removed := sortedSet.RemoveByRank(start, stop)
 	if removed > 0 {
+		if sortedSet.Len() == 0 {
+			db.Remove(key)
+		}
 		db.addAof(utils.ToCmdLine3("zremrangebyrank", args...))
 	}
 	return protocol.MakeIntReply(removed)
@@ -524,6 +530,9 @@ func execZPopMin(db *DB, args [][]byte) redis.Reply {
 		if err != nil {
 			return protocol.MakeErrReply("ERR value is not an integer or out of range")
 		}
+		if count < 0 {
+			return protocol.MakeErrReply("ERR value is out of range, must be positive")
+		}
 	}
 
 	sortedSet, errReply := db.getAsSortedSet(key)
@@ -536,6 +545,9 @@ func execZPopMin(db *DB, args [][]byte) redis.Reply {
 
 	removed := sortedSet.PopMin(count)
 	if len(removed) > 0 {
+		if sortedSet.Len() == 0 {
+			db.Remove(key)
+		}
 		db.addAof(utils.ToCmdLine3("zpopmin", args...))
 	}
 	result := make([][]byte, 0, len(removed)*2)
@@ -572,6 +584,9 @@ func execZRem(db *DB, args [][]byte) redis.Reply {
 		}
 	}
 	if deleted > 0 {
+		if sortedSet.Len() == 0 {
+			db.Remove(key)
+		}
 		db.addAof(utils.ToCmdLine3("zrem", args...))
 	}
 	return protocol.MakeIntReply(deleted)
@@ -593,7 +608,7 @@ func execZIncrBy(db *DB, args [][]byte) redis.Reply {
 	rawDelta := string(args[1])
 	field := string(args[2])
 	delta, err := strconv.ParseFloat(rawDelta, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(delta) {
 		return protocol.MakeErrReply("ERR value is not a valid float")
 	}
 
@@ -610,6 +625,9 @@ func execZIncrBy(db *DB, args [][]byte) redis.Reply {
 		return protocol.MakeBulkReply(args[1])
 	}
 	score := element.Score + delta
+	if math.IsNaN(score) {
+		return protocol.MakeErrReply("ERR resulting score is not a number (NaN)")
+	}
 	sortedSet.Add(field, score)
 	bytes := []byte(strconv.FormatFloat(score, 'f', -1, 64))
 	db.addAof(utils.ToCmdLine3("zincrby", args...))
@@ -662,7 +680,7 @@ func execZRangeByLex(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if sortedSet == nil {
-		return protocol.MakeIntReply(0)
+		return &protocol.EmptyMultiBulkReply{}
 	}
 
 	minEle, maxEle := string(args[1]), string(args[2])
@@ -732,6 +750,12 @@ func execZRemRangeByLex(db *DB, args [][]byte) redis.Reply {
 	}
 
 	count := sortedSet.RemoveRange(min, max)
+	if count > 0 {
+		if sortedSet.Len() == 0 {
+			db.Remove(key)
+		}
+		db.addAof(utils.ToCmdLine3("zremrangebylex", args...))
+	}
 
 	return protocol.MakeIntReply(count)
 }
@@ -751,7 +775,7 @@ func execZRevRangeByLex(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if sortedSet == nil {
-		return protocol.MakeIntReply(0)
+		return &protocol.EmptyMultiBulkReply{}
 	}
 
 	minEle, maxEle := string(args[2]), string(args[1])
@@ -796,25 +820,9 @@ func execZRevRangeByLex(db *DB, args [][]byte) redis.Reply {
 }
 
 func execZScan(db *DB, args [][]byte) redis.Reply {
-	var count int = 10
-	var pattern string = "*"
-	if len(args) > 2 {
-		for i := 2; i < len(args); i++ {
-			arg := strings.ToLower(string(args[i]))
-			if arg == "count" {
-				count0, err := strconv.Atoi(string(args[i+1]))
-				if err != nil {
-					return &protocol.SyntaxErrReply{}
-				}
-				count = count0
-				i++
-			} else if arg == "match" {
-				pattern = string(args[i+1])
-				i++
-			} else {
-				return &protocol.SyntaxErrReply{}
-			}
-		}
+	pattern, count, _, errReply := parseScanOptions(args, 2, false)
+	if errReply != nil {
+		return errReply
 	}
 	key := string(args[0])
 	// get entity
@@ -826,7 +834,7 @@ func execZScan(db *DB, args [][]byte) redis.Reply {
 		return &protocol.EmptyMultiBulkReply{}
 	}
 	cursor, err := strconv.Atoi(string(args[1]))
-	if err != nil {
+	if err != nil || cursor < 0 {
 		return protocol.MakeErrReply("ERR invalid cursor")
 	}
 

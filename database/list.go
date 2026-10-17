@@ -93,6 +93,21 @@ func execLLen(db *DB, args [][]byte) redis.Reply {
 func execLPop(db *DB, args [][]byte) redis.Reply {
 	// parse args
 	key := string(args[0])
+	hasCount := len(args) == 2
+	var count int
+	if hasCount {
+		count64, err := strconv.ParseInt(string(args[1]), 10, 64)
+		if err != nil {
+			return protocol.MakeErrReply("ERR value is not an integer or out of range")
+		}
+		if count64 < 0 {
+			return protocol.MakeErrReply("ERR value is out of range, must be positive")
+		}
+		if count64 == 0 {
+			return protocol.MakeEmptyMultiBulkReply()
+		}
+		count = int(count64)
+	}
 
 	// get data
 	list, errReply := db.getAsList(key)
@@ -100,15 +115,13 @@ func execLPop(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if list == nil {
+		if hasCount {
+			return protocol.MakeEmptyMultiBulkReply()
+		}
 		return &protocol.NullBulkReply{}
 	}
 
-	if len(args) == 2 {
-		count64, err := strconv.ParseInt(string(args[1]), 10, 64)
-		if err != nil {
-			return protocol.MakeErrReply("ERR value is not an integer or out of range")
-		}
-		count := int(count64)
+	if hasCount {
 		if count > list.Len() {
 			count = list.Len()
 		}
@@ -395,6 +408,21 @@ func undoLSet(db *DB, args [][]byte) []CmdLine {
 func execRPop(db *DB, args [][]byte) redis.Reply {
 	// parse args
 	key := string(args[0])
+	hasCount := len(args) == 2
+	var count int
+	if hasCount {
+		count64, err := strconv.ParseInt(string(args[1]), 10, 64)
+		if err != nil {
+			return protocol.MakeErrReply("ERR value is not an integer or out of range")
+		}
+		if count64 < 0 {
+			return protocol.MakeErrReply("ERR value is out of range, must be positive")
+		}
+		if count64 == 0 {
+			return protocol.MakeEmptyMultiBulkReply()
+		}
+		count = int(count64)
+	}
 
 	// get data
 	list, errReply := db.getAsList(key)
@@ -402,15 +430,13 @@ func execRPop(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if list == nil {
+		if hasCount {
+			return protocol.MakeEmptyMultiBulkReply()
+		}
 		return &protocol.NullBulkReply{}
 	}
 
-	if len(args) == 2 {
-		count64, err := strconv.ParseInt(string(args[1]), 10, 64)
-		if err != nil {
-			return protocol.MakeErrReply("ERR value is not an integer or out of range")
-		}
-		count := int(count64)
+	if hasCount {
 		if count > list.Len() {
 			count = list.Len()
 		}
@@ -634,6 +660,9 @@ func execLTrim(db *DB, args [][]byte) redis.Reply {
 		list.RemoveLast()
 	}
 
+	if list.Len() == 0 {
+		db.Remove(key)
+	}
 	db.addAof(utils.ToCmdLine3("ltrim", args...))
 
 	return protocol.MakeOkReply()

@@ -72,15 +72,15 @@ func NewStandaloneServer() *Server {
 	// record aof
 	validAof := false
 	if config.Properties.AppendOnly {
-		validAof = fileExists(config.Properties.AppendFilename)
+		validAof = fileExists(config.Properties.AofPath())
 		aofHandler, err := NewPersister(server,
-			config.Properties.AppendFilename, true, config.Properties.AppendFsync)
+			config.Properties.AofPath(), true, config.Properties.AppendFsync)
 		if err != nil {
 			panic(err)
 		}
 		server.bindPersister(aofHandler)
 	}
-	if config.Properties.RDBFilename != "" && !validAof {
+	if config.Properties.RdbPath() != "" && !validAof {
 		// load rdb
 		err := server.loadRdbFile()
 		if err != nil {
@@ -360,7 +360,16 @@ func (server *Server) ExecWithLock(conn redis.Connection, cmdLine [][]byte) redi
 
 // BGRewriteAOF asynchronously rewrites Append-Only-File
 func BGRewriteAOF(db *Server, args [][]byte) redis.Reply {
+	if db.persister == nil {
+		return protocol.MakeErrReply("AppendOnly is false, you can't rewrite aof file")
+	}
 	go func() {
+		defer func() {
+			if e := recover(); e != nil {
+				// a panic in a bare goroutine would crash the whole server
+				logger.Errorf("background aof rewrite panic: %v\n%s", e, string(debug.Stack()))
+			}
+		}()
 		// the error must be logged here: an unhandled panic/error in a bare goroutine would crash the server
 		if err := db.persister.Rewrite(); err != nil {
 			logger.Errorf("background aof rewrite failed: %v", err)
@@ -371,6 +380,9 @@ func BGRewriteAOF(db *Server, args [][]byte) redis.Reply {
 
 // RewriteAOF start Append-Only-File rewriting and blocked until it finished
 func RewriteAOF(db *Server, args [][]byte) redis.Reply {
+	if db.persister == nil {
+		return protocol.MakeErrReply("AppendOnly is false, you can't rewrite aof file")
+	}
 	err := db.persister.Rewrite()
 	if err != nil {
 		return protocol.MakeErrReply(err.Error())
@@ -383,10 +395,7 @@ func SaveRDB(db *Server, args [][]byte) redis.Reply {
 	if db.persister == nil {
 		return protocol.MakeErrReply("please enable aof before using save")
 	}
-	rdbFilename := config.Properties.RDBFilename
-	if rdbFilename == "" {
-		rdbFilename = "dump.rdb"
-	}
+	rdbFilename := config.Properties.DumpPath()
 	err := db.persister.GenerateRDB(rdbFilename)
 	if err != nil {
 		return protocol.MakeErrReply(err.Error())
@@ -405,10 +414,7 @@ func BGSaveRDB(db *Server, args [][]byte) redis.Reply {
 				logger.Error(err)
 			}
 		}()
-		rdbFilename := config.Properties.RDBFilename
-		if rdbFilename == "" {
-			rdbFilename = "dump.rdb"
-		}
+		rdbFilename := config.Properties.DumpPath()
 		err := db.persister.GenerateRDB(rdbFilename)
 		if err != nil {
 			logger.Error(err)

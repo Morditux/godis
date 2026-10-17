@@ -14,6 +14,10 @@ const (
 	protoMaxBulkLen = 512 << 20
 	// maxCommandArgs mirrors redis's proto-max-multibulk default (1M arguments).
 	maxCommandArgs = 1 << 20
+	// maxInlineCommandLen bounds inline (telnet-style) commands.
+	maxInlineCommandLen = 64 << 10
+	// maxIntegerHeaderLen bounds "*<n>\r\n"/"$<n>\r\n" headers.
+	maxIntegerHeaderLen = 20
 )
 
 var (
@@ -40,6 +44,9 @@ func scanCommand(data []byte) (int, bool, error) {
 	if data[0] != '*' {
 		// inline command, terminated by the first \r\n
 		for i := 0; i < len(data); i++ {
+			if i >= maxInlineCommandLen {
+				return 0, false, errors.New("inline command too long")
+			}
 			if data[i] == '\r' {
 				if i+1 >= len(data) {
 					return 0, false, nil // need more bytes to decide
@@ -108,6 +115,9 @@ func scanCommand(data []byte) (int, bool, error) {
 func parseIntHeader(data []byte, from int) (int, int, bool, error) {
 	end := from
 	for end < len(data) {
+		if end-from >= maxIntegerHeaderLen {
+			return 0, 0, false, errors.New("integer header too long")
+		}
 		if data[end] == '\r' {
 			if end+1 >= len(data) {
 				return 0, 0, false, nil

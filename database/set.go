@@ -7,7 +7,6 @@ import (
 	"github.com/hdt3213/godis/lib/utils"
 	"github.com/hdt3213/godis/redis/protocol"
 	"strconv"
-	"strings"
 )
 
 func (db *DB) getAsSet(key string) (*HashSet.Set, protocol.ErrorReply) {
@@ -136,6 +135,9 @@ func execSPop(db *DB, args [][]byte) redis.Reply {
 		result[i] = []byte(v)
 	}
 
+	if set.Len() == 0 {
+		db.Remove(key)
+	}
 	if count > 0 {
 		db.addAof(utils.ToCmdLine3("spop", args...))
 	}
@@ -220,16 +222,24 @@ func execSInterStore(db *DB, args [][]byte) redis.Reply {
 			return errReply
 		}
 		if set.Len() == 0 {
+			// an empty/missing source makes the intersection empty: Redis
+			// deletes the destination and clears its ttl.
+			db.Remove(dest)
+			db.addAof(utils.ToCmdLine3("sinterstore", args...))
 			return protocol.MakeIntReply(0)
 		}
 		sets = append(sets, set)
 	}
 	result := HashSet.Intersect(sets...)
 
+	db.Remove(dest) // overwrite destination and clear its ttl
+	db.addAof(utils.ToCmdLine3("sinterstore", args...))
+	if result.Len() == 0 {
+		return protocol.MakeIntReply(0)
+	}
 	db.PutEntity(dest, &database.DataEntity{
 		Data: result,
 	})
-	db.addAof(utils.ToCmdLine3("sinterstore", args...))
 	return protocol.MakeIntReply(int64(result.Len()))
 }
 
@@ -261,7 +271,8 @@ func execSUnionStore(db *DB, args [][]byte) redis.Reply {
 		sets = append(sets, set)
 	}
 	result := HashSet.Union(sets...)
-	db.Remove(dest) // clean ttl
+	db.Remove(dest) // clean ttl and previous value
+	db.addAof(utils.ToCmdLine3("sunionstore", args...))
 	if result.Len() == 0 {
 		return protocol.MakeIntReply(0)
 	}
@@ -269,7 +280,6 @@ func execSUnionStore(db *DB, args [][]byte) redis.Reply {
 	db.PutEntity(dest, &database.DataEntity{
 		Data: result,
 	})
-	db.addAof(utils.ToCmdLine3("sunionstore", args...))
 	return protocol.MakeIntReply(int64(result.Len()))
 }
 
@@ -301,14 +311,14 @@ func execSDiffStore(db *DB, args [][]byte) redis.Reply {
 		sets = append(sets, set)
 	}
 	result := HashSet.Diff(sets...)
-	db.Remove(dest) // clean ttl
+	db.Remove(dest) // clean ttl and previous value
+	db.addAof(utils.ToCmdLine3("sdiffstore", args...))
 	if result.Len() == 0 {
 		return protocol.MakeIntReply(0)
 	}
 	db.PutEntity(dest, &database.DataEntity{
 		Data: result,
 	})
-	db.addAof(utils.ToCmdLine3("sdiffstore", args...))
 	return protocol.MakeIntReply(int64(result.Len()))
 }
 
@@ -356,25 +366,9 @@ func execSRandMember(db *DB, args [][]byte) redis.Reply {
 }
 
 func execSScan(db *DB, args [][]byte) redis.Reply {
-	var count int = 10
-	var pattern string = "*"
-	if len(args) > 2 {
-		for i := 2; i < len(args); i++ {
-			arg := strings.ToLower(string(args[i]))
-			if arg == "count" {
-				count0, err := strconv.Atoi(string(args[i+1]))
-				if err != nil {
-					return &protocol.SyntaxErrReply{}
-				}
-				count = count0
-				i++
-			} else if arg == "match" {
-				pattern = string(args[i+1])
-				i++
-			} else {
-				return &protocol.SyntaxErrReply{}
-			}
-		}
+	pattern, count, _, errReply := parseScanOptions(args, 2, false)
+	if errReply != nil {
+		return errReply
 	}
 	key := string(args[0])
 	// get entity
@@ -386,7 +380,7 @@ func execSScan(db *DB, args [][]byte) redis.Reply {
 		return &protocol.EmptyMultiBulkReply{}
 	}
 	cursor, err := strconv.Atoi(string(args[1]))
-	if err != nil {
+	if err != nil || cursor < 0 {
 		return protocol.MakeErrReply("ERR invalid cursor")
 	}
 

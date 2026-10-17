@@ -78,14 +78,26 @@ func (sortedSet *SortedSet) GetRank(member string, desc bool) (rank int64) {
 	return r
 }
 
-// ForEachByRank visits each member which rank within [start, stop), sort by ascending order, rank starts from 0
+// ForEachByRank visits each member which rank within [start, stop), sort by ascending order, rank starts from 0.
+// Out-of-range bounds are clamped instead of panicking: empty sorted sets
+// (which older versions could leave behind after ZREM) must not crash callers
+// such as ZCOUNT, AOF rewrite and RDB generation.
 func (sortedSet *SortedSet) ForEachByRank(start int64, stop int64, desc bool, consumer func(element *Element) bool) {
-	size := sortedSet.Len()
-	if start < 0 || start >= size {
-		panic("illegal start " + strconv.FormatInt(start, 10))
+	if sortedSet == nil {
+		return
 	}
-	if stop < start || stop > size {
-		panic("illegal end " + strconv.FormatInt(stop, 10))
+	size := sortedSet.Len()
+	if size == 0 {
+		return
+	}
+	if start < 0 {
+		start = 0
+	}
+	if stop > size {
+		stop = size
+	}
+	if start >= size || stop <= start {
+		return
 	}
 
 	// find start node
@@ -117,12 +129,22 @@ func (sortedSet *SortedSet) ForEachByRank(start int64, stop int64, desc bool, co
 
 // RangeByRank returns members which rank within [start, stop), sort by ascending order, rank starts from 0
 func (sortedSet *SortedSet) RangeByRank(start int64, stop int64, desc bool) []*Element {
-	sliceSize := int(stop - start)
-	slice := make([]*Element, sliceSize)
-	i := 0
+	if sortedSet == nil {
+		return []*Element{}
+	}
+	size := sortedSet.Len()
+	if start < 0 {
+		start = 0
+	}
+	if stop > size {
+		stop = size
+	}
+	if start >= size || stop <= start {
+		return []*Element{}
+	}
+	slice := make([]*Element, 0, stop-start)
 	sortedSet.ForEachByRank(start, stop, desc, func(element *Element) bool {
-		slice[i] = element
-		i++
+		slice = append(slice, element)
 		return true
 	})
 	return slice
@@ -252,7 +274,7 @@ func (sortedSet *SortedSet) ZSetScan(cursor int, count int, pattern string) ([][
 				continue
 			}
 			result = append(result, []byte(k))
-			result = append(result, []byte(strconv.FormatFloat(elem.Score, 'f', 10, 64)))
+			result = append(result, []byte(strconv.FormatFloat(elem.Score, 'f', -1, 64)))
 		}
 	}
 	return result, 0

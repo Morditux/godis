@@ -47,14 +47,18 @@ func main() {
 		TimeFormat: "2006-01-02",
 	})
 	configFilename := os.Getenv("CONFIG")
+	var configErr error
 	if configFilename == "" {
 		if fileExists("redis.conf") {
-			config.SetupConfig("redis.conf")
+			configErr = config.SetupConfig("redis.conf")
 		} else {
 			config.Properties = defaultProperties
 		}
 	} else {
-		config.SetupConfig(configFilename)
+		configErr = config.SetupConfig(configFilename)
+	}
+	if configErr != nil {
+		logger.Fatal(fmt.Sprintf("load config failed: %v", configErr))
 	}
 	listenAddr := fmt.Sprintf("%s:%d", config.Properties.Bind, config.Properties.Port)
 
@@ -87,6 +91,6 @@ func main() {
 		err = stdserver.Serve(listenAddr, handler)
 	}
 	if err != nil {
-		logger.Errorf("start server failed: %v", err)
+		logger.Fatal(fmt.Sprintf("start server failed: %v", err))
 	}
 }

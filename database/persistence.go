@@ -18,7 +18,7 @@ import (
 
 // loadRdbFile loads rdb file from disk
 func (server *Server) loadRdbFile() error {
-	rdbFile, err := os.Open(config.Properties.RDBFilename)
+	rdbFile, err := os.Open(config.Properties.RdbPath())
 	if err != nil {
 		return fmt.Errorf("open rdb file failed: %v", err)
 	}

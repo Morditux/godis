@@ -71,10 +71,12 @@ func (tw *TimeWheel) Stop() {
 	tw.stopChannel <- true
 }
 
-// AddJob adds a new job to the pending queue
+// AddJob adds a new job to the pending queue. A non-positive delay is
+// scheduled for the next tick instead of being silently dropped: callers use
+// it for "expire now" and dropping such jobs used to leave zombie entries.
 func (tw *TimeWheel) AddJob(delay time.Duration, key string, job func()) {
 	if delay < 0 {
-		return
+		delay = 0
 	}
 	tw.addTaskChannel <- task{delay: delay, key: key, job: job}
 }
