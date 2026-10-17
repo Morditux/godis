@@ -68,8 +68,11 @@ type Persister struct {
 	aofFinished chan struct{}
 	// pause aof for start/finish aof rewrite progress
 	pausingAof sync.Mutex
-	currentDB  int
-	listeners  map[Listener]struct{}
+	// rewriteMu serializes AOF rewrite and RDB generation; TryLock is used
+	// to reject a second concurrent rewrite instead of corrupting both files.
+	rewriteMu sync.Mutex
+	currentDB int
+	listeners map[Listener]struct{}
 	// reuse cmdLine buffer
 	buffer []CmdLine
 	// closeOnce guards double Close
@@ -183,6 +186,12 @@ func (persister *Persister) writeAof(p *payload) {
 	persister.buffer = persister.buffer[:0] // reuse underlying array
 	persister.pausingAof.Lock()             // prevent other goroutines from pausing aof
 	defer persister.pausingAof.Unlock()
+	if persister.aofFile == nil {
+		// the live file is temporarily unavailable after a failed reopen;
+		// keep the server alive but make the data-loss condition visible.
+		logger.Error("aof file is not open, dropping command")
+		return
+	}
 	// ensure aof is in the right database
 	if p.dbIndex != persister.currentDB {
 		// select db
@@ -284,6 +293,10 @@ func (persister *Persister) LoadAof(maxBytes int) {
 // Fsync flushes aof file to disk
 func (persister *Persister) Fsync() {
 	persister.pausingAof.Lock()
+	if persister.aofFile == nil {
+		persister.pausingAof.Unlock()
+		return
+	}
 	if err := persister.aofFile.Sync(); err != nil {
 		logger.Errorf("fsync failed: %v", err)
 	}
@@ -296,15 +309,13 @@ func (persister *Persister) Close() {
 		return
 	}
 	persister.closeOnce.Do(func() {
+		// wait for a running rewrite/RDB generation to finish before closing
+		// the file it may still be using
+		persister.rewriteMu.Lock()
+		defer persister.rewriteMu.Unlock()
+		persister.cancel()
+		<-persister.aofFinished // wait for aof finished
 		if persister.aofFile != nil {
-			/*
-			 * Close used to close(persister.aofChan) which could panic with
-			 * `send on closed channel` if SaveCmdLine was running concurrently.
-			 * Now we signal shutdown through ctx: the aof goroutine drains
-			 * its queue and exits, and never corrupts on late submissions.
-			 */
-			persister.cancel()
-			<-persister.aofFinished // wait for aof finished
 			err := persister.aofFile.Close()
 			if err != nil {
 				logger.Warn(err)
@@ -343,19 +354,29 @@ func (persister *Persister) generateAof(ctx *RewriteCtx) error {
 			return err
 		}
 		// dump db
+		var writeErr error
 		tmpAof.db.ForEach(i, func(key string, entity *database.DataEntity, expiration *time.Time) bool {
 			cmd := EntityToCmd(key, entity)
 			if cmd != nil {
-				_, _ = tmpFile.Write(cmd.ToBytes())
+				if _, err := tmpFile.Write(cmd.ToBytes()); err != nil {
+					writeErr = err
+					return false
+				}
 			}
 			if expiration != nil {
 				cmd := MakeExpireCmd(key, *expiration)
 				if cmd != nil {
-					_, _ = tmpFile.Write(cmd.ToBytes())
+					if _, err := tmpFile.Write(cmd.ToBytes()); err != nil {
+						writeErr = err
+						return false
+					}
 				}
 			}
 			return true
 		})
+		if writeErr != nil {
+			return writeErr
+		}
 	}
 	return nil
 }

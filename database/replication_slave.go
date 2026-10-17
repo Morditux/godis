@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -342,10 +342,17 @@ func makeRdbLoader(upgradeAof bool) (*Server, string, error) {
 	if !upgradeAof {
 		return rdbLoader, "", nil
 	}
-	// make aof handler to generate new aof file during loading rdb
-	newAofFile, err := ioutil.TempFile("", "*.aof")
+	// make aof handler to generate new aof file during loading rdb.
+	// Create it next to the final AOF so the rename in loadMasterRDB stays on
+	// the same filesystem.
+	aofPath := config.Properties.AofPath()
+	dir := filepath.Dir(aofPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, "", err
+	}
+	newAofFile, err := os.CreateTemp(dir, "*.aof")
 	if err != nil {
-		return nil, "", fmt.Errorf("create temp rdb failed: %v", err)
+		return nil, "", fmt.Errorf("create temp aof failed: %v", err)
 	}
 	newAofFilename := newAofFile.Name()
 	aofHandler, err := NewPersister(rdbLoader, newAofFilename, false, aof.FsyncNo)
@@ -434,8 +441,6 @@ func (server *Server) receiveAOF(ctx context.Context, configVersion int32) error
 			n := len(cmdLine.ToBytes()) // todo: directly get size from socket
 			server.slaveStatus.replOffset += int64(n)
 			server.slaveStatus.lastRecvTime = time.Now()
-			logger.Info(fmt.Sprintf("receive %d bytes from master, current offset %d, %s",
-				n, server.slaveStatus.replOffset, strconv.Quote(string(cmdLine.ToBytes()))))
 			server.slaveStatus.mutex.Unlock()
 		case <-ctx.Done():
 			_ = conn.Close()

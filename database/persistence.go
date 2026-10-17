@@ -16,11 +16,17 @@ import (
 	rdb "github.com/hdt3213/rdb/parser"
 )
 
-// loadRdbFile loads rdb file from disk
+// loadRdbFile loads rdb file from disk. A missing file is not an error (the
+// server starts with an empty dataset); any other error is returned so that
+// startup can fail closed instead of silently discarding data.
 func (server *Server) loadRdbFile() error {
-	rdbFile, err := os.Open(config.Properties.RdbPath())
+	path := config.Properties.RdbPath()
+	rdbFile, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open rdb file failed: %v", err)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open rdb file %q: %w", path, err)
 	}
 	defer func() {
 		_ = rdbFile.Close()
@@ -28,7 +34,7 @@ func (server *Server) loadRdbFile() error {
 	decoder := rdb.NewDecoder(rdbFile)
 	err = server.LoadRDB(decoder)
 	if err != nil {
-		return fmt.Errorf("load rdb file failed: %v", err)
+		return fmt.Errorf("load rdb file %q: %w", path, err)
 	}
 	return nil
 }

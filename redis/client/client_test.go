@@ -17,7 +17,17 @@ import (
 	"testing"
 )
 
+func requireRedis(t *testing.T) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:6379", 200*time.Millisecond)
+	if err != nil {
+		t.Skipf("redis is not available on 127.0.0.1:6379: %v", err)
+	}
+	_ = conn.Close()
+}
+
 func TestClient(t *testing.T) {
+	requireRedis(t)
 	logger.Setup(&logger.Settings{
 		Path:       "logs",
 		Name:       "godis",
@@ -118,6 +128,7 @@ func TestClient(t *testing.T) {
 }
 
 func TestReconnect(t *testing.T) {
+	requireRedis(t)
 	logger.Setup(&logger.Settings{
 		Path:       "logs",
 		Name:       "godis",

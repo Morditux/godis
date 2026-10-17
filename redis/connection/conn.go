@@ -111,6 +111,16 @@ func (c *Connection) Write(b []byte) (int, error) {
 	return c.conn.Write(b)
 }
 
+// SetWriteDeadline sets the write deadline on the underlying connection.
+// It is used by replication to prevent a slow replica from blocking the AOF
+// writer (which forwards updates to online replicas).
+func (c *Connection) SetWriteDeadline(t time.Time) error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.SetWriteDeadline(t)
+}
+
 func (c *Connection) Name() string {
 	if c.conn != nil {
 		return c.conn.RemoteAddr().String()

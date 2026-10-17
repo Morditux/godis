@@ -1,8 +1,11 @@
 package aof
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/hdt3213/godis/config"
@@ -10,6 +13,11 @@ import (
 	"github.com/hdt3213/godis/lib/utils"
 	"github.com/hdt3213/godis/redis/protocol"
 )
+
+// ErrRewriteInProgress is returned when a rewrite/RDB generation is already
+// running. It prevents two AOF rewrites from renaming different temp files
+// over the same live file.
+var ErrRewriteInProgress = errors.New("ERR background append only file rewriting already in progress")
 
 func (persister *Persister) newRewriteHandler() *Persister {
 	h := &Persister{}
@@ -25,18 +33,61 @@ type RewriteCtx struct {
 	dbIdx    int // selected db index when startRewrite
 }
 
-// Rewrite carries out AOF rewrite
+// cleanupRewriteCtx closes and removes a temp file that was not committed.
+func cleanupRewriteCtx(ctx *RewriteCtx) {
+	if ctx == nil || ctx.tmpFile == nil {
+		return
+	}
+	name := ctx.tmpFile.Name()
+	_ = ctx.tmpFile.Close()
+	_ = os.Remove(name)
+}
+
+// Rewrite carries out AOF rewrite. It rejects a concurrent rewrite instead of
+// letting two rewrites race on the live AOF file.
 func (persister *Persister) Rewrite() error {
+	if !persister.rewriteMu.TryLock() {
+		return ErrRewriteInProgress
+	}
+	defer persister.rewriteMu.Unlock()
+	return persister.rewriteLocked()
+}
+
+// StartBackgroundRewrite starts an asynchronous rewrite. The single-flight
+// decision is made synchronously so the caller can report ErrRewriteInProgress
+// to the client; errors happening in the goroutine are logged.
+func (persister *Persister) StartBackgroundRewrite() error {
+	if !persister.rewriteMu.TryLock() {
+		return ErrRewriteInProgress
+	}
+	go func() {
+		defer persister.rewriteMu.Unlock()
+		defer func() {
+			if e := recover(); e != nil {
+				logger.Errorf("background aof rewrite panic: %v", e)
+			}
+		}()
+		if err := persister.rewriteLocked(); err != nil {
+			logger.Errorf("background aof rewrite failed: %v", err)
+		}
+	}()
+	return nil
+}
+
+func (persister *Persister) rewriteLocked() error {
 	ctx, err := persister.StartRewrite()
 	if err != nil {
 		return err
 	}
-	err = persister.DoRewrite(ctx)
-	if err != nil {
+	if err := persister.DoRewrite(ctx); err != nil {
+		cleanupRewriteCtx(ctx)
 		return err
 	}
-
-	return persister.FinishRewrite(ctx)
+	if err := persister.FinishRewrite(ctx); err != nil {
+		cleanupRewriteCtx(ctx)
+		return err
+	}
+	return nil
 }
 
 // DoRewrite actually rewrite aof file
@@ -58,6 +109,9 @@ func (persister *Persister) StartRewrite() (*RewriteCtx, error) {
 	// pausing aof
 	persister.pausingAof.Lock()
 	defer persister.pausingAof.Unlock()
+	if persister.aofFile == nil {
+		return nil, errors.New("aof file is not open")
+	}
 
 	err := persister.aofFile.Sync()
 	if err != nil {
@@ -73,8 +127,13 @@ func (persister *Persister) StartRewrite() (*RewriteCtx, error) {
 	}
 	filesize := fileInfo.Size()
 
-	// create tmp file
-	file, err := os.CreateTemp(config.GetTmpDir(), "*.aof")
+	// create the temp file next to the live AOF: the final rename must stay on
+	// the same filesystem, otherwise it fails with EXDEV.
+	dir := filepath.Dir(persister.aofFilename)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp(dir, "*.aof")
 	if err != nil {
 		logger.Warn("tmp file create failed")
 		return nil, err
@@ -86,71 +145,87 @@ func (persister *Persister) StartRewrite() (*RewriteCtx, error) {
 	}, nil
 }
 
-// FinishRewrite finish rewrite procedure
-func (persister *Persister) FinishRewrite(ctx *RewriteCtx) error {
-	persister.pausingAof.Lock() // pausing aof
-	defer persister.pausingAof.Unlock()
-	tmpFile := ctx.tmpFile
-
-	// copy commands executed during rewriting to tmpFile
-	errOccurs := func() bool {
-		/* read write commands executed during rewriting */
-		src, err := os.Open(persister.aofFilename)
-		if err != nil {
-			logger.Error("open aofFilename failed: " + err.Error())
-			return true
-		}
-		defer func() {
-			_ = src.Close()
-			_ = tmpFile.Close()
-		}()
-
-		_, err = src.Seek(ctx.fileSize, 0)
-		if err != nil {
-			logger.Error("seek failed: " + err.Error())
-			return true
-		}
-		// sync tmpFile's db index with online aofFile
-		data := protocol.MakeMultiBulkReply(utils.ToCmdLine("SELECT", strconv.Itoa(ctx.dbIdx))).ToBytes()
-		_, err = tmpFile.Write(data)
-		if err != nil {
-			logger.Error("tmp file rewrite failed: " + err.Error())
-			return true
-		}
-		// copy data
-		_, err = io.Copy(tmpFile, src)
-		if err != nil {
-			logger.Error("copy aof filed failed: " + err.Error())
-			return true
-		}
-		return false
-	}()
-	if errOccurs {
-		return nil // errors have already been logged; keep the current aof file as is
-	}
-
-	// replace current aof file by tmp file
-	_ = persister.aofFile.Close()
-	if err := os.Rename(tmpFile.Name(), persister.aofFilename); err != nil {
-		logger.Warn(err)
-	}
-	// reopen aof file for further write
+func (persister *Persister) reopenAofFile() error {
 	aofFile, err := os.OpenFile(persister.aofFilename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		// log instead of panic: this function is usually invoked within a background goroutine,
-		// a panic here will crash the whole server
-		logger.Errorf("reopen aof file failed: %v", err)
+		persister.aofFile = nil
 		return err
 	}
 	persister.aofFile = aofFile
+	return nil
+}
 
-	// write select command again to resume aof file selected db
-	// it should have the same db index with  persister.currentDB
-	data := protocol.MakeMultiBulkReply(utils.ToCmdLine("SELECT", strconv.Itoa(persister.currentDB))).ToBytes()
-	_, err = persister.aofFile.Write(data)
+// FinishRewrite replaces the live AOF with the rewritten temp file. On any
+// failure the current AOF is left in place and the temp file is removed.
+func (persister *Persister) FinishRewrite(ctx *RewriteCtx) error {
+	if ctx == nil || ctx.tmpFile == nil {
+		return errors.New("invalid rewrite context")
+	}
+	persister.pausingAof.Lock() // pausing aof
+	defer persister.pausingAof.Unlock()
+
+	tmpFile := ctx.tmpFile
+	tmpName := tmpFile.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	src, err := os.Open(persister.aofFilename)
 	if err != nil {
-		logger.Errorf("rewrite aof file select db failed: %v", err)
-		return err
+		return fmt.Errorf("open aof file %q: %w", persister.aofFilename, err)
+	}
+	defer func() {
+		if src != nil {
+			_ = src.Close()
+		}
+	}()
+	if _, err = src.Seek(ctx.fileSize, 0); err != nil {
+		return fmt.Errorf("seek aof file: %w", err)
+	}
+	// sync tmpFile's db index with the online aofFile
+	data := protocol.MakeMultiBulkReply(utils.ToCmdLine("SELECT", strconv.Itoa(ctx.dbIdx))).ToBytes()
+	if _, err = tmpFile.Write(data); err != nil {
+		return fmt.Errorf("write rewrite buffer: %w", err)
+	}
+	if _, err = io.Copy(tmpFile, src); err != nil {
+		return fmt.Errorf("copy aof tail: %w", err)
+	}
+	if err = tmpFile.Sync(); err != nil {
+		return fmt.Errorf("sync rewritten aof: %w", err)
+	}
+	if err = tmpFile.Close(); err != nil {
+		return fmt.Errorf("close rewritten aof: %w", err)
+	}
+	// close src before rename so the operation also works on Windows
+	if err = src.Close(); err != nil {
+		return fmt.Errorf("close old aof: %w", err)
+	}
+	src = nil
+
+	if err = persister.aofFile.Sync(); err != nil {
+		return fmt.Errorf("sync current aof: %w", err)
+	}
+	if err = persister.aofFile.Close(); err != nil {
+		_ = persister.reopenAofFile()
+		return fmt.Errorf("close current aof: %w", err)
+	}
+	if err = os.Rename(tmpName, persister.aofFilename); err != nil {
+		_ = persister.reopenAofFile()
+		return fmt.Errorf("replace aof file: %w", err)
+	}
+	committed = true
+	if err = persister.reopenAofFile(); err != nil {
+		return fmt.Errorf("reopen rewritten aof: %w", err)
+	}
+
+	// resume the file with the currently selected database
+	data = protocol.MakeMultiBulkReply(utils.ToCmdLine("SELECT", strconv.Itoa(persister.currentDB))).ToBytes()
+	if _, err = persister.aofFile.Write(data); err != nil {
+		return fmt.Errorf("write select to rewritten aof: %w", err)
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io/ioutil"
+	"net"
 	"os"
 	"path"
 	"testing"
@@ -19,7 +20,17 @@ import (
 	"github.com/hdt3213/godis/redis/protocol/asserts"
 )
 
+func requireExternalRedis(t *testing.T) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:6379", 200*time.Millisecond)
+	if err != nil {
+		t.Skipf("redis is not available on 127.0.0.1:6379: %v", err)
+	}
+	_ = conn.Close()
+}
+
 func TestReplicationSlaveSide(t *testing.T) {
+	requireExternalRedis(t)
 	tmpDir, err := ioutil.TempDir("", "godis")
 	if err != nil {
 		t.Error(err)
@@ -176,6 +187,7 @@ func TestReplicationSlaveSide(t *testing.T) {
 }
 
 func TestReplicationFailover(t *testing.T) {
+	requireExternalRedis(t)
 	tmpDir, err := os.MkdirTemp("", "godis")
 	if err != nil {
 		t.Error(err)

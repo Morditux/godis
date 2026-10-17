@@ -84,3 +84,53 @@ func TestServerFsyncEverySec(t *testing.T) {
 	ret = reader.Exec(conn, utils.ToCmdLine("get", "1"))
 	asserts.AssertBulkReply(t, ret, "1")
 }
+
+func TestSaveWithoutAOF(t *testing.T) {
+	oldProperties := config.Properties
+	defer func() { config.Properties = oldProperties }()
+
+	dir := t.TempDir()
+	rdbPath := filepath.Join(dir, "snapshot.rdb")
+	config.Properties = &config.ServerProperties{
+		Databases:   4,
+		Dir:         dir,
+		RDBFilename: rdbPath,
+	}
+	server := NewStandaloneServer()
+	conn := connection.NewFakeConn()
+	server.Exec(conn, utils.ToCmdLine("SET", "persisted", "value"))
+	ret := server.Exec(conn, utils.ToCmdLine("SAVE"))
+	asserts.AssertNotError(t, ret)
+	server.Close()
+
+	if _, err := os.Stat(rdbPath); err != nil {
+		t.Fatalf("SAVE did not create %s: %v", rdbPath, err)
+	}
+
+	reader := NewStandaloneServer()
+	defer reader.Close()
+	ret = reader.Exec(conn, utils.ToCmdLine("GET", "persisted"))
+	asserts.AssertBulkReply(t, ret, "value")
+}
+
+func TestCorruptRDBFailsClosed(t *testing.T) {
+	oldProperties := config.Properties
+	defer func() { config.Properties = oldProperties }()
+
+	dir := t.TempDir()
+	rdbPath := filepath.Join(dir, "corrupt.rdb")
+	if err := os.WriteFile(rdbPath, []byte("this is not an rdb file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config.Properties = &config.ServerProperties{
+		Databases:   4,
+		Dir:         dir,
+		RDBFilename: rdbPath,
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewStandaloneServer must fail closed on a corrupt RDB")
+		}
+	}()
+	NewStandaloneServer()
+}

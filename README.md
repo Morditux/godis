@@ -97,8 +97,9 @@ Run the full test suite with the race detector (same as CI):
 go test -race -count=1 ./...
 ```
 
-Only the two replication tests in `database` (`TestReplicationSlaveSide`, `TestReplicationFailover`) need a real Redis
-server listening on `127.0.0.1:6379`:
+The replication and client integration tests (`TestReplicationSlaveSide`, `TestReplicationFailover`, `TestClient`,
+`TestReconnect`) use a real Redis server on `127.0.0.1:6379` and are skipped automatically when it is not running.
+To exercise them:
 
 ```bash
 docker run -d --name godis-redis-test -p 6379:6379 redis:latest redis-server --save '' --appendonly no

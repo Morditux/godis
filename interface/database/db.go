@@ -42,3 +42,12 @@ type DBEngine interface {
 type DataEntity struct {
 	Data interface{}
 }
+
+// RDBEntry is a point-in-time copy of a key used to generate an RDB snapshot.
+// Entity must not be shared with the live database when the snapshot is taken
+// from a running server.
+type RDBEntry struct {
+	Key        string
+	Entity     *DataEntity
+	Expiration *time.Time
+}

@@ -1,7 +1,9 @@
 package aof
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -16,56 +18,135 @@ import (
 	"github.com/hdt3213/rdb/model"
 )
 
-// todo: forbid concurrent rewrite
-
-// GenerateRDB generates rdb file from aof file
+// GenerateRDB generates an RDB file from the persisted AOF snapshot.
 func (persister *Persister) GenerateRDB(rdbFilename string) error {
-	ctx, err := persister.startGenerateRDB(nil, nil)
-	if err != nil {
-		return err
-	}
-	err = persister.generateRDB(ctx)
-	if err != nil {
-		return err
-	}
-	err = ctx.tmpFile.Close()
-	if err != nil {
-		return err
-	}
-	err = os.Rename(ctx.tmpFile.Name(), rdbFilename)
-	if err != nil {
-		return err
-	}
-	return nil
+	persister.rewriteMu.Lock()
+	defer persister.rewriteMu.Unlock()
+	return persister.generateRDBFile(rdbFilename, nil, nil)
 }
 
 // GenerateRDBForReplication asynchronously generates rdb file from aof file and returns a channel to receive following data
 // parameter listener would receive following updates of rdb
 // parameter hook allows you to do something during aof pausing
 func (persister *Persister) GenerateRDBForReplication(rdbFilename string, listener Listener, hook func()) error {
-	ctx, err := persister.startGenerateRDB(listener, hook)
-	if err != nil {
-		return err
-	}
+	persister.rewriteMu.Lock()
+	defer persister.rewriteMu.Unlock()
+	return persister.generateRDBFile(rdbFilename, listener, hook)
+}
 
-	err = persister.generateRDB(ctx)
+func (persister *Persister) generateRDBFile(rdbFilename string, listener Listener, hook func()) error {
+	if rdbFilename == "" {
+		return errors.New("empty rdb filename")
+	}
+	dir := filepath.Dir(rdbFilename)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	ctx, err := persister.startGenerateRDB(listener, hook, dir)
 	if err != nil {
 		return err
 	}
-	err = ctx.tmpFile.Close()
-	if err != nil {
+	committed := false
+	defer func() {
+		if !committed {
+			if listener != nil {
+				persister.RemoveListener(listener)
+			}
+			cleanupRewriteCtx(ctx)
+		}
+	}()
+	if err := persister.generateRDB(ctx); err != nil {
 		return err
 	}
-	err = os.Rename(ctx.tmpFile.Name(), rdbFilename)
-	if err != nil {
+	if err := ctx.tmpFile.Sync(); err != nil {
 		return err
 	}
+	if err := ctx.tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(ctx.tmpFile.Name(), rdbFilename); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
-func (persister *Persister) startGenerateRDB(newListener Listener, hook func()) (*RewriteCtx, error) {
+// RDBProvider supplies point-in-time database snapshots for RDB encoding.
+// Implementations must return independent copies of the entities.
+type RDBProvider interface {
+	DBNum() int
+	Snapshot(dbIndex int) []*database.RDBEntry
+}
+
+// engineRDBProvider adapts a DBEngine (used for AOF replay) to RDBProvider.
+type engineRDBProvider struct {
+	db database.DBEngine
+}
+
+func (p engineRDBProvider) DBNum() int {
+	return config.Properties.Databases
+}
+
+func (p engineRDBProvider) Snapshot(dbIndex int) []*database.RDBEntry {
+	entries := make([]*database.RDBEntry, 0)
+	p.db.ForEach(dbIndex, func(key string, entity *database.DataEntity, expiration *time.Time) bool {
+		entries = append(entries, &database.RDBEntry{
+			Key:        key,
+			Entity:     entity,
+			Expiration: expiration,
+		})
+		return true
+	})
+	return entries
+}
+
+// GenerateRDBFromDB writes an RDB snapshot directly from a live database. It
+// is used by SAVE/BGSAVE and does not require AOF to be enabled.
+func GenerateRDBFromDB(provider RDBProvider, rdbFilename string) error {
+	if rdbFilename == "" {
+		return errors.New("empty rdb filename")
+	}
+	if dir := filepath.Dir(rdbFilename); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	// create the temp file next to the destination so the final rename stays
+	// on the same filesystem (rename across mounts is not atomic and may fail)
+	file, err := os.CreateTemp(filepath.Dir(rdbFilename), "*.rdb")
+	if err != nil {
+		return err
+	}
+	tmpName := file.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = file.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := encodeRDBProvider(provider, file); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, rdbFilename); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (persister *Persister) startGenerateRDB(newListener Listener, hook func(), tmpDir string) (*RewriteCtx, error) {
 	persister.pausingAof.Lock() // pausing aof
 	defer persister.pausingAof.Unlock()
+	if persister.aofFile == nil {
+		return nil, errors.New("aof file is not open")
+	}
 
 	err := persister.aofFile.Sync()
 	if err != nil {
@@ -80,8 +161,12 @@ func (persister *Persister) startGenerateRDB(newListener Listener, hook func()) 
 		return nil, err
 	}
 	filesize := fileInfo.Size()
-	// create tmp file
-	file, err := os.CreateTemp(config.GetTmpDir(), "*.aof")
+	// create the temp file in the destination directory so the final rename
+	// stays on the same filesystem
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp(tmpDir, "*.rdb")
 	if err != nil {
 		logger.Warn("tmp file create failed")
 		return nil, err
@@ -103,8 +188,15 @@ func (persister *Persister) generateRDB(ctx *RewriteCtx) error {
 	// load aof tmpFile
 	tmpHandler := persister.newRewriteHandler()
 	tmpHandler.LoadAof(int(ctx.fileSize))
+	return encodeRDB(tmpHandler.db, ctx.tmpFile)
+}
 
-	encoder := rdb.NewEncoder(ctx.tmpFile).EnableCompress()
+func encodeRDB(db database.DBEngine, file *os.File) error {
+	return encodeRDBProvider(engineRDBProvider{db: db}, file)
+}
+
+func encodeRDBProvider(provider RDBProvider, file *os.File) error {
+	encoder := rdb.NewEncoder(file).EnableCompress()
 	err := encoder.WriteHeader()
 	if err != nil {
 		return err
@@ -122,76 +214,69 @@ func (persister *Persister) generateRDB(ctx *RewriteCtx) error {
 	}
 
 	for k, v := range auxMap {
-		err := encoder.WriteAux(k, v)
-		if err != nil {
+		if err := encoder.WriteAux(k, v); err != nil {
 			return err
 		}
 	}
 
-	for i := 0; i < config.Properties.Databases; i++ {
-		keyCount, ttlCount := tmpHandler.db.GetDBSize(i)
-		if keyCount == 0 {
+	for i := 0; i < provider.DBNum(); i++ {
+		entries := provider.Snapshot(i)
+		if len(entries) == 0 {
 			continue
 		}
-		err = encoder.WriteDBHeader(uint(i), uint64(keyCount), uint64(ttlCount))
-		if err != nil {
+		ttlCount := 0
+		for _, entry := range entries {
+			if entry.Expiration != nil {
+				ttlCount++
+			}
+		}
+		if err := encoder.WriteDBHeader(uint(i), uint64(len(entries)), uint64(ttlCount)); err != nil {
 			return err
 		}
-		// dump db
-		var err2 error
-		tmpHandler.db.ForEach(i, func(key string, entity *database.DataEntity, expiration *time.Time) bool {
+		for _, entry := range entries {
 			var opts []interface{}
-			if expiration != nil {
-				opts = append(opts, rdb.WithTTL(uint64(expiration.UnixNano()/1e6)))
+			if entry.Expiration != nil {
+				opts = append(opts, rdb.WithTTL(uint64(entry.Expiration.UnixNano()/1e6)))
 			}
-			switch obj := entity.Data.(type) {
+			switch obj := entry.Entity.Data.(type) {
 			case []byte:
-				err = encoder.WriteStringObject(key, obj, opts...)
+				err = encoder.WriteStringObject(entry.Key, obj, opts...)
 			case List.List[[]byte]:
 				vals := make([][]byte, 0, obj.Len())
 				obj.ForEach(func(i int, v []byte) bool {
 					vals = append(vals, v)
 					return true
 				})
-				err = encoder.WriteListObject(key, vals, opts...)
+				err = encoder.WriteListObject(entry.Key, vals, opts...)
 			case *set.Set:
 				vals := make([][]byte, 0, obj.Len())
 				obj.ForEach(func(m string) bool {
 					vals = append(vals, []byte(m))
 					return true
 				})
-				err = encoder.WriteSetObject(key, vals, opts...)
+				err = encoder.WriteSetObject(entry.Key, vals, opts...)
 			case dict.Dict[[]byte]:
 				hash := make(map[string][]byte)
 				obj.ForEach(func(key string, val []byte) bool {
 					hash[key] = val
 					return true
 				})
-				err = encoder.WriteHashMapObject(key, hash, opts...)
+				err = encoder.WriteHashMapObject(entry.Key, hash, opts...)
 			case *SortedSet.SortedSet:
-				var entries []*model.ZSetEntry
+				var zEntries []*model.ZSetEntry
 				obj.ForEachByRank(int64(0), obj.Len(), true, func(element *SortedSet.Element) bool {
-					entries = append(entries, &model.ZSetEntry{
+					zEntries = append(zEntries, &model.ZSetEntry{
 						Member: element.Member,
 						Score:  element.Score,
 					})
 					return true
 				})
-				err = encoder.WriteZSetObject(key, entries, opts...)
+				err = encoder.WriteZSetObject(entry.Key, zEntries, opts...)
 			}
 			if err != nil {
-				err2 = err
-				return false
+				return err
 			}
-			return true
-		})
-		if err2 != nil {
-			return err2
 		}
 	}
-	err = encoder.WriteEnd()
-	if err != nil {
-		return err
-	}
-	return nil
+	return encoder.WriteEnd()
 }

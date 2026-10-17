@@ -4,19 +4,69 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hdt3213/godis/config"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/lib/logger"
 	"github.com/hdt3213/godis/lib/sync/atomic"
 	"github.com/hdt3213/godis/lib/utils"
 	"github.com/hdt3213/godis/redis/protocol"
 )
+
+const (
+	// replWriteTimeout bounds a single backlog write to a replica. Without it
+	// a slow replica blocks the AOF writer (which forwards updates) forever.
+	replWriteTimeout = 5 * time.Second
+	// replRDBWriteTimeout bounds the full-sync RDB transfer; it runs in its own
+	// goroutine but must not hang forever.
+	replRDBWriteTimeout = 5 * time.Minute
+)
+
+type writeDeadliner interface {
+	SetWriteDeadline(time.Time) error
+}
+
+func setReplWriteDeadline(conn redis.Connection, timeout time.Duration) {
+	if conn == nil {
+		return
+	}
+	dl, ok := conn.(writeDeadliner)
+	if !ok {
+		return
+	}
+	if timeout > 0 {
+		_ = dl.SetWriteDeadline(time.Now().Add(timeout))
+		return
+	}
+	_ = dl.SetWriteDeadline(time.Time{})
+}
+
+// newTempRDBPath reserves a unique path for an RDB file. The placeholder is
+// removed so GenerateRDBForReplication can atomically rename its own temp
+// file into place (and so the empty file does not leak on every save).
+func newTempRDBPath() (string, error) {
+	// create the placeholder in the configured dir: GenerateRDBForReplication
+	// creates its temp file in the same directory, which keeps the final rename
+	// on the same filesystem.
+	f, err := os.CreateTemp(config.GetTmpDir(), "*.rdb")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	return name, nil
+}
 
 /*
 `execPSync` receives `slaveof` command. Depending on the status of rdb, there are two branches:
@@ -93,6 +143,10 @@ type masterStatus struct {
 	rdbFilename  string
 	aofListener  *replAofListener
 	rewriting    atomic.Boolean
+	// sendMu serializes backlog writes to replicas: masterCron and the AOF
+	// listener can both trigger masterSendUpdatesToSlave, and interleaving two
+	// RESP writes on the same connection would corrupt the stream.
+	sendMu sync.Mutex
 }
 
 // bgSaveForReplication does bg-save and send rdb to waiting slaves
@@ -112,11 +166,13 @@ func (server *Server) bgSaveForReplication() {
 
 // saveForReplication does bg-save and send rdb to waiting slaves
 func (server *Server) saveForReplication() error {
-	rdbFile, err := ioutil.TempFile("", "*.rdb")
+	if server.persister == nil {
+		return errors.New("replication requires appendonly yes")
+	}
+	rdbFilename, err := newTempRDBPath()
 	if err != nil {
 		return fmt.Errorf("create temp rdb failed: %v", err)
 	}
-	rdbFilename := rdbFile.Name()
 	server.masterStatus.mu.Lock()
 	server.masterStatus.bgSaveState = bgSaveRunning
 	server.masterStatus.rdbFilename = rdbFilename // todo: can reuse config.Properties.RDBFilename?
@@ -129,6 +185,14 @@ func (server *Server) saveForReplication() error {
 
 	err = server.persister.GenerateRDBForReplication(rdbFilename, aofListener, nil)
 	if err != nil {
+		// do not leave bgSaveState=RUNNING forever: waitSlaves would never be
+		// served and every later PSYNC would wait for a save that already failed.
+		server.masterStatus.mu.Lock()
+		if server.masterStatus.aofListener == aofListener {
+			server.masterStatus.aofListener = nil
+		}
+		server.masterStatus.bgSaveState = bgSaveIdle
+		server.masterStatus.mu.Unlock()
 		return err
 	}
 	aofListener.readyToSend.Set(true)
@@ -156,11 +220,13 @@ func (server *Server) saveForReplication() error {
 }
 
 func (server *Server) rewriteRDB() error {
-	rdbFile, err := ioutil.TempFile("", "*.rdb")
+	if server.persister == nil {
+		return errors.New("replication requires appendonly yes")
+	}
+	rdbFilename, err := newTempRDBPath()
 	if err != nil {
 		return fmt.Errorf("create temp rdb failed: %v", err)
 	}
-	rdbFilename := rdbFile.Name()
 	newBacklog := &replBacklog{}
 	aofListener := &replAofListener{
 		backlog: newBacklog,
@@ -192,21 +258,38 @@ func (server *Server) rewriteRDB() error {
 
 // masterFullReSyncWithSlave send replication header, rdb file and all backlogs to slave
 func (server *Server) masterFullReSyncWithSlave(slave *slaveClient) error {
+	setReplWriteDeadline(slave.conn, replRDBWriteTimeout)
+	defer setReplWriteDeadline(slave.conn, 0)
+
+	server.masterStatus.mu.RLock()
+	replId := server.masterStatus.replId
+	rdbFilename := server.masterStatus.rdbFilename
+	beginOffset := server.masterStatus.backlog.beginOffset
+	server.masterStatus.mu.RUnlock()
+	if rdbFilename == "" {
+		return errors.New("no rdb file available for replication")
+	}
+
 	// write replication header
-	header := "+FULLRESYNC " + server.masterStatus.replId + " " +
-		strconv.FormatInt(server.masterStatus.backlog.beginOffset, 10) + protocol.CRLF
+	header := "+FULLRESYNC " + replId + " " +
+		strconv.FormatInt(beginOffset, 10) + protocol.CRLF
 	_, err := slave.conn.Write([]byte(header))
 	if err != nil {
 		return fmt.Errorf("write replication header to slave failed: %v", err)
 	}
 	// send rdb
-	rdbFile, err := os.Open(server.masterStatus.rdbFilename)
+	rdbFile, err := os.Open(rdbFilename)
 	if err != nil {
-		return fmt.Errorf("open rdb file %s for replication error: %v", server.masterStatus.rdbFilename, err)
+		return fmt.Errorf("open rdb file %s for replication error: %v", rdbFilename, err)
 	}
-	rdbInfo, _ := os.Stat(server.masterStatus.rdbFilename)
-	rdbSize := rdbInfo.Size()
-	rdbHeader := "$" + strconv.FormatInt(rdbSize, 10) + protocol.CRLF
+	defer func() {
+		_ = rdbFile.Close()
+	}()
+	rdbInfo, err := rdbFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat rdb file %s for replication error: %v", rdbFilename, err)
+	}
+	rdbHeader := "$" + strconv.FormatInt(rdbInfo.Size(), 10) + protocol.CRLF
 	_, err = slave.conn.Write([]byte(rdbHeader))
 	if err != nil {
 		return fmt.Errorf("write rdb header to slave failed: %v", err)
@@ -233,8 +316,12 @@ func (server *Server) masterFullReSyncWithSlave(slave *slaveClient) error {
 var cannotPartialSync = errors.New("cannot do partial sync")
 
 func (server *Server) masterTryPartialSyncWithSlave(slave *slaveClient, replId string, slaveOffset int64) error {
+	setReplWriteDeadline(slave.conn, replWriteTimeout)
+	defer setReplWriteDeadline(slave.conn, 0)
+
 	server.masterStatus.mu.RLock()
-	if replId != server.masterStatus.replId {
+	currentReplId := server.masterStatus.replId
+	if replId != currentReplId {
 		server.masterStatus.mu.RUnlock()
 		return cannotPartialSync
 	}
@@ -246,7 +333,7 @@ func (server *Server) masterTryPartialSyncWithSlave(slave *slaveClient, replId s
 	server.masterStatus.mu.RUnlock()
 
 	// send replication header
-	header := "+CONTINUE " + server.masterStatus.replId + protocol.CRLF
+	header := "+CONTINUE " + currentReplId + protocol.CRLF
 	_, err := slave.conn.Write([]byte(header))
 	if err != nil {
 		return fmt.Errorf("write replication header to slave failed: %v", err)
@@ -265,6 +352,9 @@ func (server *Server) masterTryPartialSyncWithSlave(slave *slaveClient, replId s
 // masterSendUpdatesToSlave only sends data to online slaves after bgSave is finished
 // if bgSave is running, updates will be sent after the saving finished
 func (server *Server) masterSendUpdatesToSlave() error {
+	server.masterStatus.sendMu.Lock()
+	defer server.masterStatus.sendMu.Unlock()
+
 	onlineSlaves := make(map[*slaveClient]struct{})
 	server.masterStatus.mu.RLock()
 	beginOffset := server.masterStatus.backlog.beginOffset
@@ -277,7 +367,19 @@ func (server *Server) masterSendUpdatesToSlave() error {
 		slave.mu.Lock()
 		slaveBeginOffset := slave.offset - beginOffset
 		slave.mu.Unlock()
+		if slaveBeginOffset < 0 || slaveBeginOffset > int64(len(backlog)) {
+			// the backlog was rotated while this slave was behind: a partial
+			// stream cannot be built, force a full resync on its next PSYNC.
+			logger.Errorf("slave backlog offset %d out of range [0,%d], disconnecting", slaveBeginOffset, len(backlog))
+			server.removeSlave(slave)
+			continue
+		}
+		if slaveBeginOffset == int64(len(backlog)) {
+			continue
+		}
+		setReplWriteDeadline(slave.conn, replWriteTimeout)
 		_, err := slave.conn.Write(backlog[slaveBeginOffset:])
+		setReplWriteDeadline(slave.conn, 0)
 		if err != nil {
 			logger.Errorf("send updates backlog to slave failed: %v", err)
 			server.removeSlave(slave)
@@ -291,6 +393,12 @@ func (server *Server) masterSendUpdatesToSlave() error {
 }
 
 func (server *Server) execPSync(c redis.Connection, args [][]byte) redis.Reply {
+	if len(args) != 2 {
+		return protocol.MakeArgNumErrReply("psync")
+	}
+	if server.persister == nil {
+		return protocol.MakeErrReply("ERR replication requires appendonly yes")
+	}
 	replId := string(args[0])
 	replOffset, err := strconv.ParseInt(string(args[1]), 10, 64)
 	if err != nil {
@@ -383,6 +491,7 @@ func (server *Server) setSlaveOnline(slave *slaveClient, currentOffset int64) {
 	defer server.masterStatus.mu.Unlock()
 	slave.mu.Lock()
 	slave.offset = currentOffset
+	slave.lastAckTime = time.Now()
 	slave.mu.Unlock()
 	server.masterStatus.onlineSlaves[slave] = struct{}{}
 }
@@ -401,7 +510,24 @@ func (server *Server) masterCron() {
 		server.masterStatus.backlog.appendBytes(pingBytes)
 	}
 	backlogSize := len(server.masterStatus.backlog.buf)
+	replTimeout := 60 * time.Second
+	if config.Properties.ReplTimeout > 0 {
+		replTimeout = time.Duration(config.Properties.ReplTimeout) * time.Second
+	}
+	var stale []*slaveClient
+	for slave := range server.masterStatus.onlineSlaves {
+		slave.mu.Lock()
+		lastAck := slave.lastAckTime
+		slave.mu.Unlock()
+		if !lastAck.IsZero() && time.Since(lastAck) > replTimeout {
+			stale = append(stale, slave)
+		}
+	}
 	server.masterStatus.mu.Unlock()
+	for _, slave := range stale {
+		logger.Warn("disconnect stale slave " + slave.conn.Name())
+		server.removeSlave(slave)
+	}
 	if err := server.masterSendUpdatesToSlave(); err != nil {
 		logger.Errorf("masterSendUpdatesToSlave error: %v", err)
 	}

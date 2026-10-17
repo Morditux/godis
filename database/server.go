@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,9 @@ type Server struct {
 
 	// slow log record
 	slogLogger *SlowLogger
+
+	// saveMu serializes SAVE/BGSAVE; it is independent from AOF.
+	saveMu sync.Mutex
 }
 
 func fileExists(filename string) bool {
@@ -81,10 +85,10 @@ func NewStandaloneServer() *Server {
 		server.bindPersister(aofHandler)
 	}
 	if config.Properties.RdbPath() != "" && !validAof {
-		// load rdb
-		err := server.loadRdbFile()
-		if err != nil {
-			logger.Error(err)
+		// load rdb. A missing file means an empty database, but a corrupt or
+		// unreadable file must abort startup instead of silently ignoring data.
+		if err := server.loadRdbFile(); err != nil {
+			panic(fmt.Errorf("load rdb file failed: %w", err))
 		}
 	}
 	server.slaveStatus = initReplSlaveStatus()
@@ -275,6 +279,8 @@ func (server *Server) loadDB(dbIndex int, newDB *DB) redis.Reply {
 	oldDB := server.mustSelectDB(dbIndex)
 	newDB.index = dbIndex
 	newDB.addAof = oldDB.addAof // inherit oldDB
+	newDB.insertCallback = oldDB.insertCallback
+	newDB.deleteCallback = oldDB.deleteCallback
 	server.dbSet[dbIndex].Store(newDB)
 	return &protocol.OkReply{}
 }
@@ -363,18 +369,9 @@ func BGRewriteAOF(db *Server, args [][]byte) redis.Reply {
 	if db.persister == nil {
 		return protocol.MakeErrReply("AppendOnly is false, you can't rewrite aof file")
 	}
-	go func() {
-		defer func() {
-			if e := recover(); e != nil {
-				// a panic in a bare goroutine would crash the whole server
-				logger.Errorf("background aof rewrite panic: %v\n%s", e, string(debug.Stack()))
-			}
-		}()
-		// the error must be logged here: an unhandled panic/error in a bare goroutine would crash the server
-		if err := db.persister.Rewrite(); err != nil {
-			logger.Errorf("background aof rewrite failed: %v", err)
-		}
-	}()
+	if err := db.persister.StartBackgroundRewrite(); err != nil {
+		return protocol.MakeErrReply(err.Error())
+	}
 	return protocol.MakeStatusReply("Background append only file rewriting started")
 }
 
@@ -392,12 +389,9 @@ func RewriteAOF(db *Server, args [][]byte) redis.Reply {
 
 // SaveRDB start RDB writing and blocked until it finished
 func SaveRDB(db *Server, args [][]byte) redis.Reply {
-	if db.persister == nil {
-		return protocol.MakeErrReply("please enable aof before using save")
-	}
-	rdbFilename := config.Properties.DumpPath()
-	err := db.persister.GenerateRDB(rdbFilename)
-	if err != nil {
+	db.saveMu.Lock()
+	defer db.saveMu.Unlock()
+	if err := aof.GenerateRDBFromDB(db, config.Properties.DumpPath()); err != nil {
 		return protocol.MakeErrReply(err.Error())
 	}
 	return protocol.MakeOkReply()
@@ -405,19 +399,18 @@ func SaveRDB(db *Server, args [][]byte) redis.Reply {
 
 // BGSaveRDB asynchronously save RDB
 func BGSaveRDB(db *Server, args [][]byte) redis.Reply {
-	if db.persister == nil {
-		return protocol.MakeErrReply("please enable aof before using save")
+	if !db.saveMu.TryLock() {
+		return protocol.MakeErrReply("ERR Background save already in progress")
 	}
 	go func() {
+		defer db.saveMu.Unlock()
 		defer func() {
 			if err := recover(); err != nil {
-				logger.Error(err)
+				logger.Errorf("background save panic: %v", err)
 			}
 		}()
-		rdbFilename := config.Properties.DumpPath()
-		err := db.persister.GenerateRDB(rdbFilename)
-		if err != nil {
-			logger.Error(err)
+		if err := aof.GenerateRDBFromDB(db, config.Properties.DumpPath()); err != nil {
+			logger.Errorf("background save failed: %v", err)
 		}
 	}()
 	return protocol.MakeStatusReply("Background saving started")
@@ -427,6 +420,36 @@ func BGSaveRDB(db *Server, args [][]byte) redis.Reply {
 func (server *Server) GetDBSize(dbIndex int) (int, int) {
 	db := server.mustSelectDB(dbIndex)
 	return db.data.Len(), db.ttlMap.Len()
+}
+
+// DBNum returns the number of configured databases.
+func (server *Server) DBNum() int {
+	return len(server.dbSet)
+}
+
+// Snapshot returns a deep, per-shard-consistent copy of one database for RDB
+// generation. Cloning happens while the shard read lock is held, so encoding
+// the snapshot later cannot race with writes or observe a mutated container.
+func (server *Server) Snapshot(dbIndex int) []*database.RDBEntry {
+	db := server.mustSelectDB(dbIndex)
+	entries := make([]*database.RDBEntry, 0, db.data.Len())
+	db.data.ForEach(func(key string, entity *database.DataEntity) bool {
+		if db.IsExpired(key) {
+			return true
+		}
+		var expiration *time.Time
+		if expireAt, ok := db.ttlMap.Get(key); ok {
+			expireAt := expireAt
+			expiration = &expireAt
+		}
+		entries = append(entries, &database.RDBEntry{
+			Key:        key,
+			Entity:     cloneEntity(entity),
+			Expiration: expiration,
+		})
+		return true
+	})
+	return entries
 }
 
 func (server *Server) startReplCron() {
