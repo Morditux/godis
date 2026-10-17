@@ -127,15 +127,32 @@ func (locks *Locks) RUnLocks(keys ...string) {
 	}
 }
 
-// RWLocks locks write keys and read keys together. allow duplicate keys
-func (locks *Locks) RWLocks(writeKeys []string, readKeys []string) {
-	keys := append(writeKeys, readKeys...)
-	indices := locks.toLockIndices(keys, false)
+// concatKeys merges write and read keys into a fresh slice. Appending into
+// writeKeys directly would write into its backing array's free capacity,
+// which may be shared with other slices held by the caller.
+func concatKeys(writeKeys []string, readKeys []string) []string {
+	keys := make([]string, 0, len(writeKeys)+len(readKeys))
+	keys = append(keys, writeKeys...)
+	keys = append(keys, readKeys...)
+	return keys
+}
+
+// getIndices returns the lock indices of write keys and read keys in the
+// order given by reverse, and the set of indices covering write keys
+func (locks *Locks) getIndices(writeKeys []string, readKeys []string, reverse bool) ([]uint32, map[uint32]struct{}) {
+	keys := concatKeys(writeKeys, readKeys)
+	indices := locks.toLockIndices(keys, reverse)
 	writeIndexSet := make(map[uint32]struct{})
 	for _, wKey := range writeKeys {
 		idx := locks.spread(fnv32(wKey))
 		writeIndexSet[idx] = struct{}{}
 	}
+	return indices, writeIndexSet
+}
+
+// RWLocks locks write keys and read keys together. allow duplicate keys
+func (locks *Locks) RWLocks(writeKeys []string, readKeys []string) {
+	indices, writeIndexSet := locks.getIndices(writeKeys, readKeys, false)
 	for _, index := range indices {
 		_, w := writeIndexSet[index]
 		mu := locks.table[index]
@@ -149,13 +166,7 @@ func (locks *Locks) RWLocks(writeKeys []string, readKeys []string) {
 
 // RWUnLocks unlocks write keys and read keys together. allow duplicate keys
 func (locks *Locks) RWUnLocks(writeKeys []string, readKeys []string) {
-	keys := append(writeKeys, readKeys...)
-	indices := locks.toLockIndices(keys, true)
-	writeIndexSet := make(map[uint32]struct{})
-	for _, wKey := range writeKeys {
-		idx := locks.spread(fnv32(wKey))
-		writeIndexSet[idx] = struct{}{}
-	}
+	indices, writeIndexSet := locks.getIndices(writeKeys, readKeys, true)
 	for _, index := range indices {
 		_, w := writeIndexSet[index]
 		mu := locks.table[index]

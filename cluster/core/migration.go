@@ -171,10 +171,10 @@ func execExport(cluster *Cluster, c redis.Connection, cmdLine CmdLine) redis.Rep
 	var task *raft.MigratingTask
 	taskId := string(cmdLine[1])
 	for i := 0; i < 50; i++ {
-		task = cluster.raftNode.FSM.GetMigratingTask(taskId)
-		if task == nil {
-			time.Sleep(time.Millisecond * 100)
+		if task = cluster.raftNode.FSM.GetMigratingTask(taskId); task != nil {
+			break
 		}
+		time.Sleep(time.Millisecond * 100)
 	}
 	if task == nil {
 		return protocol.MakeErrReply("ERR get migrating task timeout")
@@ -213,10 +213,10 @@ func execFinishExport(cluster *Cluster, c redis.Connection, cmdLine CmdLine) red
 	taskId := string(cmdLine[1])
 	logger.Info("finishing migration task: " + taskId)
 	for i := 0; i < 50; i++ {
-		task = cluster.raftNode.FSM.GetMigratingTask(taskId)
-		if task == nil {
-			time.Sleep(time.Millisecond * 100)
+		if task = cluster.raftNode.FSM.GetMigratingTask(taskId); task != nil {
+			break
 		}
+		time.Sleep(time.Millisecond * 100)
 	}
 	if task == nil {
 		return protocol.MakeErrReply("ERR get migrating task timeout")
@@ -283,10 +283,10 @@ func execStartMigration(cluster *Cluster, c redis.Connection, cmdLine CmdLine) r
 
 	var task *raft.MigratingTask
 	for i := 0; i < 50; i++ {
-		task = cluster.raftNode.FSM.GetMigratingTask(taskId)
-		if task == nil {
-			time.Sleep(time.Millisecond * 100)
+		if task = cluster.raftNode.FSM.GetMigratingTask(taskId); task != nil {
+			break
 		}
+		time.Sleep(time.Millisecond * 100)
 	}
 	if task == nil {
 		return protocol.MakeErrReply("ERR get migrating task timeout")

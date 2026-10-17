@@ -3,6 +3,7 @@ package raft
 import (
 	"encoding/json"
 	"io"
+	"slices"
 	"sync"
 
 	"github.com/hashicorp/raft"
@@ -193,6 +194,11 @@ func (fsm *FSM) Restore(src io.ReadCloser) error {
 	fsm.Node2Slot = make(map[string][]uint32)
 	for slot, node := range snapshot.Slot2Node {
 		fsm.Node2Slot[node] = append(fsm.Node2Slot[node], slot)
+	}
+	// addSlots / removeSlots rely on sorted distinct slot lists (sort.Search),
+	// keep the invariant documented on Node2Slot
+	for _, slots := range fsm.Node2Slot {
+		slices.Sort(slots)
 	}
 	for master, slaves := range snapshot.MasterSlaves {
 		for _, slave := range slaves.Slaves {

@@ -450,13 +450,15 @@ func execScan(db *DB, args [][]byte) redis.Reply {
 	}
 
 	if len(scanType) != 0 {
-		for i := 0; i < len(keysReply); {
-			if getType(db, string(keysReply[i])) != scanType {
-				keysReply = append(keysReply[:i], keysReply[i+1:]...)
-			} else {
-				i++
+		// filter in place, O(n) instead of O(n^2) element moves
+		n := 0
+		for _, key := range keysReply {
+			if getType(db, string(key)) == scanType {
+				keysReply[n] = key
+				n++
 			}
 		}
+		keysReply = keysReply[:n]
 	}
 	result := make([]redis.Reply, 2)
 	result[0] = protocol.MakeBulkReply([]byte(strconv.FormatInt(int64(nextCursor), 10)))

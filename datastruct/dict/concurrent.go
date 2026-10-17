@@ -416,9 +416,19 @@ func (dict *ConcurrentDict[V]) toLockIndices(keys []string, reverse bool) []uint
 	return indices
 }
 
+// concatKeys merges write and read keys into a fresh slice. Appending into
+// writeKeys directly would write into its backing array's free capacity,
+// which may be shared with other slices held by the caller.
+func concatKeys(writeKeys []string, readKeys []string) []string {
+	keys := make([]string, 0, len(writeKeys)+len(readKeys))
+	keys = append(keys, writeKeys...)
+	keys = append(keys, readKeys...)
+	return keys
+}
+
 // RWLocks locks write keys and read keys together. allow duplicate keys
 func (dict *ConcurrentDict[V]) RWLocks(writeKeys []string, readKeys []string) {
-	keys := append(writeKeys, readKeys...)
+	keys := concatKeys(writeKeys, readKeys)
 	indices := dict.toLockIndices(keys, false)
 	writeIndexSet := make(map[uint32]struct{})
 	for _, wKey := range writeKeys {
@@ -438,7 +448,7 @@ func (dict *ConcurrentDict[V]) RWLocks(writeKeys []string, readKeys []string) {
 
 // RWUnLocks unlocks write keys and read keys together. allow duplicate keys
 func (dict *ConcurrentDict[V]) RWUnLocks(writeKeys []string, readKeys []string) {
-	keys := append(writeKeys, readKeys...)
+	keys := concatKeys(writeKeys, readKeys)
 	indices := dict.toLockIndices(keys, true)
 	writeIndexSet := make(map[uint32]struct{})
 	for _, wKey := range writeKeys {

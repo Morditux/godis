@@ -121,9 +121,13 @@ func (db *DB) execNormalCommand(cmdLine [][]byte) redis.Reply {
 
 	prepare := cmd.prepare
 	write, read := prepare(cmdLine[1:])
-	db.addVersion(write...)
 	db.RWLocks(write, read)
 	defer db.RWUnLocks(write, read)
+	// Bump versions inside the lock region: two writers of the same key are
+	// serialized by the write lock here, so increments are monotonic. Bumping
+	// outside the lock used a non-atomic read-modify-write that could go
+	// backward and make WATCH miss changes.
+	db.addVersion(write...)
 	fun := cmd.executor
 	return fun(db, cmdLine[1:])
 }

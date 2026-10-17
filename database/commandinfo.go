@@ -56,7 +56,9 @@ func getKeys(args [][]byte) redis.Reply {
 		return protocol.MakeErrReply("The command has no key arguments")
 	}
 	writeKeys, readKeys := cmd.prepare(args[1:])
-	keys := append(writeKeys, readKeys...)
+	keys := make([]string, 0, len(writeKeys)+len(readKeys))
+	keys = append(keys, writeKeys...)
+	keys = append(keys, readKeys...)
 	resp := make([][]byte, len(keys))
 	for i, key := range keys {
 		resp[i] = []byte(key)

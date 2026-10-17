@@ -362,6 +362,10 @@ func TestScan(t *testing.T) {
 			t.Errorf("expect type string, found hash")
 			return
 		}
+		if gotType := getType(testDB, key); gotType != "string" {
+			t.Errorf("scan type filter leaked key %q of type %q", key, gotType)
+			return
+		}
 	}
 
 	// test returned cursor

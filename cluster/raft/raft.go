@@ -43,6 +43,13 @@ func (cfg *RaftConfig) ID() string {
 
 var Leader = raft.Leader
 var Follower = raft.Follower
+
+// proposeTimeout bounds how long Propose waits for an entry to be committed
+// and applied by the FSM. Previously the timeout was 0 (wait forever), which
+// blocked the caller indefinitely (e.g. a join/migration) if the quorum was
+// lost. Control plane operations are infrequent, so a generous bound is fine.
+const proposeTimeout = 10 * time.Second
+
 var Candidate = raft.Candidate
 
 func StartNode(cfg *RaftConfig) (*Node, error) {
@@ -198,7 +205,7 @@ func (node *Node) Propose(event *LogEntry) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("marshal event failed: %v", err)
 	}
-	future := node.inner.Apply(bin, 0)
+	future := node.inner.Apply(bin, proposeTimeout)
 	err = future.Error()
 	if err != nil {
 		return 0, fmt.Errorf("raft propose failed: %v", err)
