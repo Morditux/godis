@@ -10,6 +10,12 @@ import (
 // Set is a set of elements based on hash table
 type Set struct {
 	dict dict.Dict[struct{}]
+
+	// scanMembers is a sorted snapshot used by SetScan and rebuilt only after
+	// the membership changes.
+	scanMembers []string
+	scanVersion uint64
+	version     uint64
 }
 
 // Make creates a new set
@@ -36,12 +42,19 @@ func MakeConcurrentSafe(members ...string) *Set {
 
 // Add adds member into set
 func (set *Set) Add(val string) int {
-	return set.dict.Put(val, struct{}{})
+	ret := set.dict.Put(val, struct{}{})
+	if ret > 0 {
+		set.version++
+	}
+	return ret
 }
 
 // Remove removes member from set
 func (set *Set) Remove(val string) int {
 	_, ret := set.dict.Remove(val)
+	if ret > 0 {
+		set.version++
+	}
 	return ret
 }
 
@@ -185,8 +198,13 @@ func (set *Set) SetScan(cursor int, count int, pattern string) ([][]byte, int) {
 			return nil, -1
 		}
 	}
-	members := set.ToSlice()
-	sort.Strings(members)
+	if set.scanMembers == nil || set.scanVersion != set.version {
+		members := set.ToSlice()
+		sort.Strings(members)
+		set.scanMembers = members
+		set.scanVersion = set.version
+	}
+	members := set.scanMembers
 	if cursor >= len(members) {
 		return nil, 0
 	}

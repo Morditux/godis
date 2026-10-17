@@ -81,3 +81,18 @@ func TestSimpleDict_Scan(t *testing.T) {
 		return
 	}
 }
+
+func TestSimpleDict_ScanInvalidation(t *testing.T) {
+	d := MakeSimple[string]()
+	d.Put("a", "a")
+	d.Put("b", "b")
+	if keys, _ := d.DictScan(0, 10, "*"); len(keys) != 2 {
+		t.Fatalf("initial scan = %d keys, want 2", len(keys))
+	}
+	d.Remove("a")
+	d.Put("c", "c")
+	keys, _ := d.DictScan(0, 10, "*")
+	if len(keys) != 2 || string(keys[0]) != "b" || string(keys[1]) != "c" {
+		t.Fatalf("scan after mutation = %q, want [b c]", keys)
+	}
+}

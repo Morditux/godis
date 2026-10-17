@@ -43,10 +43,16 @@ type Server struct {
 	// slow log record
 	slogLogger *SlowLogger
 
-	// saveMu serializes SAVE/BGSAVE; it is independent from AOF.
-	saveMu sync.Mutex
-	// closeChan stops background cron goroutines; closeOnce makes Close idempotent.
+	// saveMu serializes SAVE/BGSAVE and guards closing; it is independent
+	// from AOF.
+	saveMu  sync.Mutex
+	closing bool
+	// saveWG lets Close wait for a background save before the process exits.
+	saveWG sync.WaitGroup
+	// closeChan stops background cron goroutines; cronWG lets Close wait for
+	// them before tearing down replication/persistence.
 	closeChan chan struct{}
+	cronWG    sync.WaitGroup
 	closeOnce sync.Once
 }
 
@@ -141,6 +147,15 @@ func (server *Server) Exec(c redis.Connection, cmdLine [][]byte) (result redis.R
 
 	if cmdName == "dbsize" {
 		return DbSize(c, server)
+	}
+	if cmdName == "wait" {
+		if c != nil && c.InMultiState() {
+			return protocol.MakeErrReply("ERR WAIT cannot be used in MULTI")
+		}
+		if atomic.LoadInt32(&server.role) == slaveRole {
+			return protocol.MakeIntReply(0)
+		}
+		return server.execWait(c, cmdLine[1:])
 	}
 	if cmdName == "slaveof" {
 		if c != nil && c.InMultiState() {
@@ -242,6 +257,11 @@ func (server *Server) Close() {
 		if server.closeChan != nil {
 			close(server.closeChan)
 		}
+		server.cronWG.Wait()
+		// refuse new saves and wait for a running SAVE/BGSAVE before teardown
+		server.saveMu.Lock()
+		server.closing = true
+		server.saveMu.Unlock()
 		// stop slaveStatus first
 		if server.slaveStatus != nil {
 			server.slaveStatus.close()
@@ -251,6 +271,8 @@ func (server *Server) Close() {
 		if server.masterStatus != nil {
 			server.stopMaster()
 		}
+		// a background save reads the live DB; let it finish before teardown
+		server.saveWG.Wait()
 		if server.persister != nil {
 			server.persister.Close()
 		}
@@ -405,6 +427,9 @@ func RewriteAOF(db *Server, args [][]byte) redis.Reply {
 func SaveRDB(db *Server, args [][]byte) redis.Reply {
 	db.saveMu.Lock()
 	defer db.saveMu.Unlock()
+	if db.closing {
+		return protocol.MakeErrReply("ERR server is shutting down")
+	}
 	if err := aof.GenerateRDBFromDB(db, config.Properties.DumpPath()); err != nil {
 		return protocol.MakeErrReply(err.Error())
 	}
@@ -416,7 +441,13 @@ func BGSaveRDB(db *Server, args [][]byte) redis.Reply {
 	if !db.saveMu.TryLock() {
 		return protocol.MakeErrReply("ERR Background save already in progress")
 	}
+	if db.closing {
+		db.saveMu.Unlock()
+		return protocol.MakeErrReply("ERR server is shutting down")
+	}
+	db.saveWG.Add(1)
 	go func() {
+		defer db.saveWG.Done()
 		defer db.saveMu.Unlock()
 		defer func() {
 			if err := recover(); err != nil {
@@ -467,14 +498,21 @@ func (server *Server) Snapshot(dbIndex int) []*database.RDBEntry {
 }
 
 func (server *Server) startReplCron() {
+	server.cronWG.Add(1)
 	go func(mdb *Server) {
-		ticker := time.NewTicker(time.Second * 10)
-		defer ticker.Stop()
+		defer mdb.cronWG.Done()
+		// replicas ACK every second so WAIT is responsive; the master only
+		// needs its 10s housekeeping tick.
+		masterTicker := time.NewTicker(10 * time.Second)
+		slaveTicker := time.NewTicker(time.Second)
+		defer masterTicker.Stop()
+		defer slaveTicker.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				mdb.slaveCron()
+			case <-masterTicker.C:
 				mdb.masterCron()
+			case <-slaveTicker.C:
+				mdb.slaveCron()
 			case <-mdb.closeChan:
 				return
 			}

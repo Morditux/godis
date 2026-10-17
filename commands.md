@@ -17,7 +17,11 @@
   - flushdb
   - flushall
   - keys
+  - scan
   - bgrewriteaof
+  - save
+  - bgsave
+  - wait
   - copy
   - dbsize
   - slowlog
@@ -71,6 +75,7 @@
   - hincrby
   - hincrbyfloat
   - hrandfield
+  - hscan
 - Set
   - sadd
   - sismember
@@ -85,6 +90,7 @@
   - sdiff
   - sdiffstore
   - srandmember
+  - sscan
 - SortedSet
   - zadd
   - zscore
@@ -104,6 +110,7 @@
   - zrangebylex
   - zremrangebylex
   - zrevrangebylex
+  - zscan
 - Pub / Sub
   - publish
   - subscribe
@@ -115,3 +122,11 @@
   - GeoHash
   - GeoRadius
   - GeoRadiusByMember
+## Redis compatibility notes
+
+- `SCAN`, `HSCAN`, `SSCAN`, `ZSCAN` accept `MATCH` and `COUNT`; `SCAN` also accepts `TYPE`.
+- `SET` supports `NX`, `XX`, `EX`, `PX`, `EXAT`, `PXAT`, `KEEPTTL` and `GET`.
+- `ZADD` supports `NX`, `XX`, `GT`, `LT`, `CH` and `INCR`.
+- `EXPIRE`, `PEXPIRE`, `EXPIREAT` and `PEXPIREAT` support `NX`, `XX`, `GT` and `LT`.
+- `WAIT numreplicas timeout` requires AOF on the master; it waits for the replicas to
+  acknowledge the master offset and returns the number of replicas that did.

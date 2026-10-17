@@ -263,7 +263,7 @@ func TestConnCloseResetStateAndIdempotent(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Errorf("close failed: %v", err)
 	}
-	// second close must be a no-op, not a panic and not a double pool put
+	// second close must be a no-op, not a panic and not a double cleanup
 	if err := c.Close(); err != nil {
 		t.Errorf("second close failed: %v", err)
 	}

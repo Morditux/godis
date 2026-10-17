@@ -38,6 +38,11 @@ type Handler struct {
 	activeConn sync.Map // *client -> placeholder
 	db         idatabase.DB
 	closing    atomic.Boolean // refusing new client and new request
+
+	mu        sync.Mutex
+	closed    bool
+	connWG    sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // MakeHandler creates a Handler instance
@@ -70,10 +75,11 @@ func Serve(addr string, handler *Handler) error {
 }
 
 func (h *Handler) closeClient(client *connection.Connection) {
-	// remove the connection from the tracking table and unsubscribe it before
-	// Close returns it to the connection pool; otherwise another goroutine can
-	// recycle the same object and this cleanup would operate on the new owner.
-	h.activeConn.Delete(client)
+	// only the first caller owns the cleanup: Handler.Close and the command
+	// loop can race on the same client
+	if _, loaded := h.activeConn.LoadAndDelete(client); !loaded {
+		return
+	}
 	h.db.AfterClientClose(client)
 	_ = client.Close()
 }
@@ -87,7 +93,18 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	}
 
 	client := connection.NewConn(conn)
+	// registering the connection and the WaitGroup Add must be atomic with
+	// respect to Close: otherwise Close could miss the client and wait forever.
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		_ = client.Close()
+		return
+	}
 	h.activeConn.Store(client, struct{}{})
+	h.connWG.Add(1)
+	h.mu.Unlock()
+	defer h.connWG.Done()
 
 	ch := parser.ParseStream(conn)
 	// pipeline pipelining aware batching: replies are accumulated and flushed
@@ -159,14 +176,28 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 // Close stops handler
 func (h *Handler) Close() error {
-	logger.Info("handler shutting down...")
-	h.closing.Set(true)
-	// TODO: concurrent wait
-	h.activeConn.Range(func(key interface{}, val interface{}) bool {
-		client := key.(*connection.Connection)
-		h.closeClient(client)
-		return true
+	h.closeOnce.Do(func() {
+		logger.Info("handler shutting down...")
+		h.mu.Lock()
+		h.closed = true
+		h.closing.Set(true)
+		h.mu.Unlock()
+
+		var wg sync.WaitGroup
+		h.activeConn.Range(func(key interface{}, val interface{}) bool {
+			client := key.(*connection.Connection)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				h.closeClient(client)
+			}()
+			return true
+		})
+		wg.Wait()
+		// wait for command loops to observe the closed connections before the
+		// database/AOF is torn down
+		h.connWG.Wait()
+		h.db.Close()
 	})
-	h.db.Close()
 	return nil
 }

@@ -173,9 +173,14 @@ func MakeErrReply(status string) *StandardErrReply {
 	}
 }
 
-// IsErrorReply returns true if the given protocol is error
+// IsErrorReply returns true if the given protocol is error. A nil reply or a
+// reply that encodes no bytes (e.g. NoReply) is not an error.
 func IsErrorReply(reply redis.Reply) bool {
-	return reply.ToBytes()[0] == '-'
+	if reply == nil {
+		return false
+	}
+	data := reply.ToBytes()
+	return len(data) > 0 && data[0] == '-'
 }
 
 func Try2ErrorReply(reply redis.Reply) error {

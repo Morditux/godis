@@ -372,3 +372,28 @@ func TestCorruptAOFFailsLoad(t *testing.T) {
 		t.Fatal("NewPersister must reject a corrupt AOF instead of silently loading a prefix")
 	}
 }
+
+func TestWaitForAof(t *testing.T) {
+	engine := &fakeEngine{}
+	persister := makeTestPersister(t, engine, false, FsyncNo)
+	persister.SaveCmdLine(0, utils.ToCmdLine("SET", "first", "1"))
+	persister.WaitForAof()
+
+	data, err := os.ReadFile(persister.aofFilename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "first") {
+		t.Fatalf("WaitForAof returned before the command was written: %q", data)
+	}
+
+	persister.SaveCmdLine(0, utils.ToCmdLine("SET", "second", "2"))
+	persister.WaitForAof()
+	data, err = os.ReadFile(persister.aofFilename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "second") {
+		t.Fatalf("second WaitForAof returned too early: %q", data)
+	}
+}

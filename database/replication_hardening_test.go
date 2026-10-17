@@ -2,6 +2,7 @@ package database
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func TestPSyncWithoutAOF(t *testing.T) {
 func TestMasterBacklogOffsetGuard(t *testing.T) {
 	server := newReplicationTestServer(t)
 	slaveConn := connection.NewFakeConn()
-	slave := &slaveClient{conn: slaveConn, offset: 0}
+	slave := newSlaveClient(slaveConn)
 
 	server.masterStatus.mu.Lock()
 	server.masterStatus.backlog = &replBacklog{
@@ -69,11 +70,8 @@ func TestMasterBacklogOffsetGuard(t *testing.T) {
 func TestMasterCronPrunesStaleSlave(t *testing.T) {
 	server := newReplicationTestServer(t)
 	slaveConn := connection.NewFakeConn()
-	slave := &slaveClient{
-		conn:        slaveConn,
-		offset:      0,
-		lastAckTime: time.Now().Add(-time.Minute),
-	}
+	slave := newSlaveClient(slaveConn)
+	slave.lastAckTime = time.Now().Add(-time.Minute)
 
 	server.masterStatus.mu.Lock()
 	server.masterStatus.slaveMap[slaveConn] = slave
@@ -113,4 +111,148 @@ func TestLoadDBPreservesCallbacks(t *testing.T) {
 	if got := atomic.LoadInt32(&deleted); got != 1 {
 		t.Fatalf("delete callback called %d times, want 1", got)
 	}
+}
+
+func TestWaitCountsAckedReplicas(t *testing.T) {
+	server := newReplicationTestServer(t)
+	first := newSlaveClient(connection.NewFakeConn())
+	second := newSlaveClient(connection.NewFakeConn())
+	first.ackOffset = 100
+	second.ackOffset = 50
+
+	server.masterStatus.mu.Lock()
+	server.masterStatus.backlog = &replBacklog{currentOffset: 100}
+	server.masterStatus.onlineSlaves[first] = struct{}{}
+	server.masterStatus.onlineSlaves[second] = struct{}{}
+	server.masterStatus.mu.Unlock()
+
+	// only the first replica has reached offset 100; wait for two with a
+	// short timeout and return the actual count
+	reply := server.execWait(nil, [][]byte{[]byte("2"), []byte("40")})
+	if got := string(reply.ToBytes()); got != ":1\r\n" {
+		t.Fatalf("WAIT = %q, want :1", got)
+	}
+}
+
+func TestWaitWakesWhenAckArrives(t *testing.T) {
+	server := newReplicationTestServer(t)
+	slave := newSlaveClient(connection.NewFakeConn())
+	server.masterStatus.mu.Lock()
+	server.masterStatus.backlog = &replBacklog{currentOffset: 10}
+	server.masterStatus.onlineSlaves[slave] = struct{}{}
+	server.masterStatus.mu.Unlock()
+
+	result := make(chan string, 1)
+	go func() {
+		result <- string(server.execWait(nil, [][]byte{[]byte("1"), []byte("1000")}).ToBytes())
+	}()
+	time.Sleep(20 * time.Millisecond)
+	slave.mu.Lock()
+	slave.ackOffset = 10
+	slave.mu.Unlock()
+
+	select {
+	case got := <-result:
+		if got != ":1\r\n" {
+			t.Fatalf("WAIT = %q, want :1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WAIT did not wake up after the replica acknowledged")
+	}
+}
+
+func TestAckDoesNotRewindSendOffset(t *testing.T) {
+	server := newReplicationTestServer(t)
+	conn := connection.NewFakeConn()
+	slave := newSlaveClient(conn)
+	slave.sendOffset = 100
+	slave.ackOffset = 50
+	server.masterStatus.mu.Lock()
+	server.masterStatus.slaveMap[conn] = slave
+	server.masterStatus.mu.Unlock()
+
+	reply := server.execReplConf(conn, [][]byte{[]byte("ACK"), []byte("60")})
+	if _, ok := reply.(*protocol.NoReply); !ok {
+		t.Fatalf("REPLCONF ACK = %T %q, want NoReply", reply, reply.ToBytes())
+	}
+	slave.mu.Lock()
+	sendOffset, ackOffset := slave.sendOffset, slave.ackOffset
+	slave.mu.Unlock()
+	if sendOffset != 100 || ackOffset != 60 {
+		t.Fatalf("offsets after ACK = send:%d ack:%d, want send:100 ack:60", sendOffset, ackOffset)
+	}
+}
+
+func TestWaitStopsWhenClientCloses(t *testing.T) {
+	server := newReplicationTestServer(t)
+	conn := connection.NewFakeConn()
+	server.masterStatus.mu.Lock()
+	server.masterStatus.backlog = &replBacklog{currentOffset: 100}
+	server.masterStatus.mu.Unlock()
+
+	result := make(chan string, 1)
+	go func() {
+		result <- string(server.execWait(conn, [][]byte{[]byte("1"), []byte("0")}).ToBytes())
+	}()
+	time.Sleep(20 * time.Millisecond)
+	_ = conn.Close()
+
+	select {
+	case got := <-result:
+		if got != ":0\r\n" {
+			t.Fatalf("WAIT = %q, want :0", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WAIT kept blocking after the client connection was closed")
+	}
+}
+
+type blockingReplicaConn struct {
+	*connection.FakeConn
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingReplicaConn) Write(b []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	<-c.release
+	return c.FakeConn.Write(b)
+}
+
+func TestNotifySlavesDoesNotBlockOnSlowReplica(t *testing.T) {
+	server := newReplicationTestServer(t)
+	blocking := &blockingReplicaConn{
+		FakeConn: connection.NewFakeConn(),
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	slave := newSlaveClient(blocking)
+	server.masterStatus.mu.Lock()
+	server.masterStatus.backlog = &replBacklog{}
+	server.masterStatus.backlog.appendBytes([]byte("*1\r\n$4\r\nping\r\n"))
+	server.masterStatus.mu.Unlock()
+
+	// start at offset 0 so the sender has backlog data to write
+	server.setSlaveOnline(slave, 0)
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("replica sender did not start")
+	}
+
+	// the sender is now blocked inside Write; the AOF path must not wait for it
+	done := make(chan struct{})
+	go func() {
+		server.notifySlaves()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("notifySlaves blocked on a slow replica")
+	}
+
+	close(blocking.release)
+	server.removeSlave(slave)
 }

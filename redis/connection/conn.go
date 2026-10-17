@@ -46,6 +46,13 @@ type Connection struct {
 	selectedDB int
 }
 
+// IsClosed reports whether Close has been called.
+func (c *Connection) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
 // RemoteAddr returns the remote network address
 func (c *Connection) RemoteAddr() string {
 	if c.conn == nil {

@@ -49,13 +49,14 @@ type request struct {
 }
 
 const (
-	chanSize = 256
-	maxWait  = 3 * time.Second
+	chanSize    = 256
+	maxWait     = 3 * time.Second
+	dialTimeout = 3 * time.Second
 )
 
 // MakeClient creates a new client
 func MakeClient(addr string) (*Client, error) {
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +138,7 @@ func (client *Client) reconnect() {
 	var conn net.Conn
 	for i := 0; i < 3; i++ {
 		var err error
-		conn, err = net.Dial("tcp", client.addr)
+		conn, err = net.DialTimeout("tcp", client.addr, dialTimeout)
 		if err != nil {
 			logger.Error("reconnect error: " + err.Error())
 			time.Sleep(time.Second)

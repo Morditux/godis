@@ -96,15 +96,47 @@ const (
 // slaveClient stores slave status in the view of master
 type slaveClient struct {
 	conn redis.Connection
-	// mu guards offset/lastAckTime: the REPLCONF ACK handler updates them
-	// concurrently with masterSendUpdatesToSlave, which must not hold
-	// masterStatus.mu while writing to slave connections
+	// mu guards sendOffset/ackOffset/lastAckTime. sendOffset is the last byte
+	// handed to the socket; ackOffset is the last byte the replica confirmed.
+	// Keeping them separate avoids replaying data whenever an ACK lags.
 	mu           sync.Mutex
-	offset       int64
+	sendOffset   int64
+	ackOffset    int64
 	lastAckTime  time.Time
 	announceIp   string
 	announcePort int
 	capacity     uint8
+
+	// sendCh wakes this replica's sender; the backlog itself stays shared.
+	sendCh     chan struct{}
+	doneCh     chan struct{}
+	doneOnce   sync.Once
+	senderOnce sync.Once
+}
+
+func newSlaveClient(conn redis.Connection) *slaveClient {
+	return &slaveClient{
+		conn:   conn,
+		sendCh: make(chan struct{}, 1),
+		doneCh: make(chan struct{}),
+	}
+}
+
+func (slave *slaveClient) notify() {
+	if slave == nil || slave.sendCh == nil {
+		return
+	}
+	select {
+	case slave.sendCh <- struct{}{}:
+	default:
+	}
+}
+
+func (slave *slaveClient) stopSender() {
+	if slave == nil || slave.doneCh == nil {
+		return
+	}
+	slave.doneOnce.Do(func() { close(slave.doneCh) })
 }
 
 // aofListener is currently only responsible for updating the backlog
@@ -143,10 +175,6 @@ type masterStatus struct {
 	rdbFilename  string
 	aofListener  *replAofListener
 	rewriting    atomic.Boolean
-	// sendMu serializes backlog writes to replicas: masterCron and the AOF
-	// listener can both trigger masterSendUpdatesToSlave, and interleaving two
-	// RESP writes on the same connection would corrupt the stream.
-	sendMu sync.Mutex
 }
 
 // bgSaveForReplication does bg-save and send rdb to waiting slaves
@@ -207,15 +235,26 @@ func (server *Server) saveForReplication() error {
 	server.masterStatus.waitSlaves = nil
 	server.masterStatus.mu.Unlock()
 
-	// send rdb to waiting slaves
+	// send rdb to waiting slaves in parallel: one slow replica must not delay
+	// the full sync of the others
+	var wg sync.WaitGroup
 	for slave := range waitSlaves {
-		err = server.masterFullReSyncWithSlave(slave)
-		if err != nil {
-			server.removeSlave(slave)
-			logger.Errorf("masterFullReSyncWithSlave error: %v", err)
-			continue
-		}
+		wg.Add(1)
+		go func(slave *slaveClient) {
+			defer wg.Done()
+			defer func() {
+				if err := recover(); err != nil {
+					logger.Errorf("masterFullReSyncWithSlave panic: %v", err)
+					server.removeSlave(slave)
+				}
+			}()
+			if err := server.masterFullReSyncWithSlave(slave); err != nil {
+				server.removeSlave(slave)
+				logger.Errorf("masterFullReSyncWithSlave error: %v", err)
+			}
+		}(slave)
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -349,47 +388,166 @@ func (server *Server) masterTryPartialSyncWithSlave(slave *slaveClient, replId s
 	return nil
 }
 
-// masterSendUpdatesToSlave only sends data to online slaves after bgSave is finished
-// if bgSave is running, updates will be sent after the saving finished
-func (server *Server) masterSendUpdatesToSlave() error {
-	server.masterStatus.sendMu.Lock()
-	defer server.masterStatus.sendMu.Unlock()
-
-	onlineSlaves := make(map[*slaveClient]struct{})
+// notifySlaves wakes the per-replica senders without blocking the AOF writer.
+func (server *Server) notifySlaves() {
 	server.masterStatus.mu.RLock()
-	beginOffset := server.masterStatus.backlog.beginOffset
-	backlog, currentOffset := server.masterStatus.backlog.getSnapshot()
+	defer server.masterStatus.mu.RUnlock()
 	for slave := range server.masterStatus.onlineSlaves {
-		onlineSlaves[slave] = struct{}{}
+		slave.notify() // non-blocking, buffered channel
+	}
+}
+
+// slaveSender is the only goroutine writing replication updates to one slave.
+func (server *Server) slaveSender(slave *slaveClient) {
+	for {
+		select {
+		case <-slave.doneCh:
+			return
+		case <-server.closeChan:
+			return
+		case <-slave.sendCh:
+			if err := server.sendUpdatesToSlave(slave); err != nil {
+				logger.Errorf("send updates backlog to slave failed: %v", err)
+				server.removeSlave(slave)
+				return
+			}
+		}
+	}
+}
+
+// sendUpdatesToSlave sends the backlog range this particular slave has not
+// received yet. It must only be called by that slave's sender goroutine.
+func (server *Server) sendUpdatesToSlave(slave *slaveClient) error {
+	server.masterStatus.mu.RLock()
+	if _, online := server.masterStatus.onlineSlaves[slave]; !online {
+		server.masterStatus.mu.RUnlock()
+		return nil
+	}
+	backlog := server.masterStatus.backlog
+	if backlog == nil {
+		server.masterStatus.mu.RUnlock()
+		return nil
+	}
+	beginOffset := backlog.beginOffset
+	backlogBytes, currentOffset := backlog.getSnapshot()
+	slave.mu.Lock()
+	slaveBeginOffset := slave.sendOffset - beginOffset
+	slave.mu.Unlock()
+	server.masterStatus.mu.RUnlock()
+
+	if slaveBeginOffset < 0 || slaveBeginOffset > int64(len(backlogBytes)) {
+		return fmt.Errorf("slave backlog offset %d out of range [0,%d]", slaveBeginOffset, len(backlogBytes))
+	}
+	if slaveBeginOffset == int64(len(backlogBytes)) {
+		return nil
+	}
+	setReplWriteDeadline(slave.conn, replWriteTimeout)
+	_, err := slave.conn.Write(backlogBytes[slaveBeginOffset:])
+	setReplWriteDeadline(slave.conn, 0)
+	if err != nil {
+		return err
+	}
+	slave.mu.Lock()
+	if slave.sendOffset < currentOffset {
+		slave.sendOffset = currentOffset
+	}
+	slave.mu.Unlock()
+	return nil
+}
+
+// masterSendUpdatesToSlave performs one synchronous flush for all online
+// slaves. Production uses the per-slave senders; this helper is kept for
+// tests and explicit flushes.
+func (server *Server) masterSendUpdatesToSlave() error {
+	server.masterStatus.mu.RLock()
+	slaves := make([]*slaveClient, 0, len(server.masterStatus.onlineSlaves))
+	for slave := range server.masterStatus.onlineSlaves {
+		slaves = append(slaves, slave)
 	}
 	server.masterStatus.mu.RUnlock()
-	for slave := range onlineSlaves {
-		slave.mu.Lock()
-		slaveBeginOffset := slave.offset - beginOffset
-		slave.mu.Unlock()
-		if slaveBeginOffset < 0 || slaveBeginOffset > int64(len(backlog)) {
-			// the backlog was rotated while this slave was behind: a partial
-			// stream cannot be built, force a full resync on its next PSYNC.
-			logger.Errorf("slave backlog offset %d out of range [0,%d], disconnecting", slaveBeginOffset, len(backlog))
-			server.removeSlave(slave)
-			continue
-		}
-		if slaveBeginOffset == int64(len(backlog)) {
-			continue
-		}
-		setReplWriteDeadline(slave.conn, replWriteTimeout)
-		_, err := slave.conn.Write(backlog[slaveBeginOffset:])
-		setReplWriteDeadline(slave.conn, 0)
-		if err != nil {
+	for _, slave := range slaves {
+		if err := server.sendUpdatesToSlave(slave); err != nil {
 			logger.Errorf("send updates backlog to slave failed: %v", err)
 			server.removeSlave(slave)
-			continue
 		}
-		slave.mu.Lock()
-		slave.offset = currentOffset
-		slave.mu.Unlock()
 	}
 	return nil
+}
+
+// countAckedSlaves returns how many online replicas have acknowledged at
+// least target offset.
+func (server *Server) countAckedSlaves(target int64) int {
+	server.masterStatus.mu.RLock()
+	defer server.masterStatus.mu.RUnlock()
+	count := 0
+	for slave := range server.masterStatus.onlineSlaves {
+		slave.mu.Lock()
+		acked := slave.ackOffset
+		slave.mu.Unlock()
+		if acked >= target {
+			count++
+		}
+	}
+	return count
+}
+
+// execWait implements WAIT numreplicas timeout. It waits until enough online
+// replicas acknowledged the master's current offset, or the timeout expires.
+func (server *Server) execWait(c redis.Connection, args [][]byte) redis.Reply {
+	if len(args) != 2 {
+		return protocol.MakeArgNumErrReply("wait")
+	}
+	numReplicas, err := strconv.Atoi(string(args[0]))
+	if err != nil || numReplicas < 0 {
+		return protocol.MakeErrReply("ERR value is not an integer or out of range")
+	}
+	timeoutMs, err := strconv.Atoi(string(args[1]))
+	if err != nil || timeoutMs < 0 {
+		return protocol.MakeErrReply("ERR timeout is not an integer or out of range")
+	}
+	if server.persister != nil {
+		// include writes that are still queued in the AOF writer
+		server.persister.WaitForAof()
+	}
+	server.masterStatus.mu.RLock()
+	target := int64(0)
+	if server.masterStatus.backlog != nil {
+		target = server.masterStatus.backlog.currentOffset
+	}
+	server.masterStatus.mu.RUnlock()
+
+	if numReplicas == 0 {
+		return protocol.MakeIntReply(0)
+	}
+	var deadline time.Time
+	if timeoutMs > 0 {
+		maxTimeoutMs := int64(^uint64(0)>>1) / int64(time.Millisecond)
+		if int64(timeoutMs) > maxTimeoutMs {
+			timeoutMs = int(maxTimeoutMs)
+		}
+		deadline = time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		acked := server.countAckedSlaves(target)
+		if acked >= numReplicas {
+			return protocol.MakeIntReply(int64(acked))
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return protocol.MakeIntReply(int64(acked))
+		}
+		if c != nil {
+			if checker, ok := c.(interface{ IsClosed() bool }); ok && checker.IsClosed() {
+				return protocol.MakeIntReply(int64(acked))
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-server.closeChan:
+			return protocol.MakeIntReply(int64(acked))
+		}
+	}
 }
 
 func (server *Server) execPSync(c redis.Connection, args [][]byte) redis.Reply {
@@ -408,9 +566,7 @@ func (server *Server) execPSync(c redis.Connection, args [][]byte) redis.Reply {
 	defer server.masterStatus.mu.Unlock()
 	slave := server.masterStatus.slaveMap[c]
 	if slave == nil {
-		slave = &slaveClient{
-			conn: c,
-		}
+		slave = newSlaveClient(c)
 		c.SetSlave()
 		server.masterStatus.slaveMap[c] = slave
 	}
@@ -467,7 +623,15 @@ func (server *Server) execReplConf(c redis.Connection, args [][]byte) redis.Repl
 				return protocol.MakeErrReply("ERR no PSYNC session for this connection")
 			}
 			slave.mu.Lock()
-			slave.offset = offset
+			if offset < 0 {
+				offset = 0
+			}
+			if offset > slave.sendOffset {
+				offset = slave.sendOffset
+			}
+			if offset > slave.ackOffset {
+				slave.ackOffset = offset
+			}
 			slave.lastAckTime = time.Now()
 			slave.mu.Unlock()
 			return &protocol.NoReply{}
@@ -477,6 +641,7 @@ func (server *Server) execReplConf(c redis.Connection, args [][]byte) redis.Repl
 }
 
 func (server *Server) removeSlave(slave *slaveClient) {
+	slave.stopSender()
 	server.masterStatus.mu.Lock()
 	defer server.masterStatus.mu.Unlock()
 	_ = slave.conn.Close()
@@ -488,12 +653,27 @@ func (server *Server) removeSlave(slave *slaveClient) {
 
 func (server *Server) setSlaveOnline(slave *slaveClient, currentOffset int64) {
 	server.masterStatus.mu.Lock()
-	defer server.masterStatus.mu.Unlock()
 	slave.mu.Lock()
-	slave.offset = currentOffset
+	slave.sendOffset = currentOffset
+	// do not count a freshly synced replica as ACKed until it confirms the
+	// stream; WAIT would otherwise return before the data is durable on it.
+	slave.ackOffset = 0
 	slave.lastAckTime = time.Now()
 	slave.mu.Unlock()
+	if slave.sendCh == nil {
+		slave.sendCh = make(chan struct{}, 1)
+	}
+	if slave.doneCh == nil {
+		slave.doneCh = make(chan struct{})
+	}
 	server.masterStatus.onlineSlaves[slave] = struct{}{}
+	startSender := false
+	slave.senderOnce.Do(func() { startSender = true })
+	server.masterStatus.mu.Unlock()
+	if startSender {
+		go server.slaveSender(slave)
+	}
+	slave.notify()
 }
 
 var pingBytes = protocol.MakeMultiBulkReply(utils.ToCmdLine("ping")).ToBytes()
@@ -528,9 +708,7 @@ func (server *Server) masterCron() {
 		logger.Warn("disconnect stale slave " + slave.conn.Name())
 		server.removeSlave(slave)
 	}
-	if err := server.masterSendUpdatesToSlave(); err != nil {
-		logger.Errorf("masterSendUpdatesToSlave error: %v", err)
-	}
+	server.notifySlaves()
 	if backlogSize > maxBacklogSize && !server.masterStatus.rewriting.Get() {
 		go func() {
 			server.masterStatus.rewriting.Set(true)
@@ -558,11 +736,9 @@ func (listener *replAofListener) Callback(cmdLines []CmdLine) {
 	}
 	listener.mdb.masterStatus.mu.Unlock()
 	// listener could receive updates generated during rdb saving in progress
-	// Do not send updates to slave before rdb saving is finished
+	// Do not wake the senders before the rdb is finished.
 	if listener.readyToSend.Get() {
-		if err := listener.mdb.masterSendUpdatesToSlave(); err != nil {
-			logger.Errorf("masterSendUpdatesToSlave after receive aof error: %v", err)
-		}
+		listener.mdb.notifySlaves()
 	}
 }
 
@@ -585,6 +761,7 @@ func (server *Server) stopMaster() {
 
 	// disconnect with slave
 	for _, slave := range server.masterStatus.slaveMap {
+		slave.stopSender()
 		_ = slave.conn.Close()
 		delete(server.masterStatus.slaveMap, slave.conn)
 		delete(server.masterStatus.waitSlaves, slave)
@@ -603,4 +780,15 @@ func (server *Server) stopMaster() {
 	server.masterStatus.waitSlaves = make(map[*slaveClient]struct{})
 	server.masterStatus.onlineSlaves = make(map[*slaveClient]struct{})
 	server.masterStatus.bgSaveState = bgSaveIdle
+}
+
+// execWaitCommand is only metadata: Server.Exec intercepts WAIT before routing
+// it to a DB because the command needs the replication state.
+func execWaitCommand(db *DB, args [][]byte) redis.Reply {
+	return protocol.MakeErrReply("ERR WAIT must be executed by the server")
+}
+
+func init() {
+	registerCommand("Wait", execWaitCommand, noPrepare, nil, 3, flagReadOnly).
+		attachCommandExtra([]string{redisFlagReadonly}, 0, 0, 0)
 }

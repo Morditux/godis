@@ -42,7 +42,9 @@ const (
 type payload struct {
 	cmdLine CmdLine
 	dbIndex int
-	wg      *sync.WaitGroup
+	// done is used by the WaitForAof barrier; a nil command line with a done
+	// channel is a queue marker, not a command.
+	done chan struct{}
 }
 
 // Listener will be called-back after receiving a aof payload
@@ -156,6 +158,34 @@ func (persister *Persister) SaveCmdLine(dbIndex int, cmdLine CmdLine) {
 
 }
 
+// WaitForAof blocks until every command submitted before the call has been
+// written to the AOF and forwarded to its listeners. It is used by WAIT so the
+// replication offset includes the caller's previous write.
+func (persister *Persister) WaitForAof() {
+	if persister == nil || persister.aofChan == nil {
+		return
+	}
+	if persister.aofFsync == FsyncAlways {
+		// FsyncAlways writes synchronously in SaveCmdLine.
+		return
+	}
+	select {
+	case <-persister.ctx.Done():
+		return
+	default:
+	}
+	done := make(chan struct{})
+	select {
+	case persister.aofChan <- &payload{done: done}:
+	case <-persister.ctx.Done():
+		return
+	}
+	select {
+	case <-done:
+	case <-persister.ctx.Done():
+	}
+}
+
 // listenCmd listen aof channel and write into file.
 // It stops when persister.ctx is canceled, after draining remaining payloads.
 func (persister *Persister) listenCmd() {
@@ -187,6 +217,12 @@ func (persister *Persister) listenCmd() {
 }
 
 func (persister *Persister) writeAof(p *payload) {
+	if p.done != nil {
+		defer close(p.done)
+	}
+	if p.cmdLine == nil {
+		return // barrier marker
+	}
 	persister.buffer = persister.buffer[:0] // reuse underlying array
 	persister.pausingAof.Lock()             // prevent other goroutines from pausing aof
 	defer persister.pausingAof.Unlock()

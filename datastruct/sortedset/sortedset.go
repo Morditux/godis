@@ -11,6 +11,12 @@ import (
 type SortedSet struct {
 	dict     map[string]*Element
 	skiplist *skiplist
+
+	// scanMembers is a sorted snapshot used by ZSetScan and rebuilt only when
+	// membership changes (score-only updates do not invalidate it).
+	scanMembers []string
+	scanVersion uint64
+	version     uint64
 }
 
 // Make makes a new SortedSet
@@ -36,6 +42,7 @@ func (sortedSet *SortedSet) Add(member string, score float64) bool {
 		return false
 	}
 	sortedSet.skiplist.insert(member, score)
+	sortedSet.version++
 	return true
 }
 
@@ -59,6 +66,7 @@ func (sortedSet *SortedSet) Remove(member string) bool {
 	if ok {
 		sortedSet.skiplist.remove(member, v.Score)
 		delete(sortedSet.dict, member)
+		sortedSet.version++
 		return true
 	}
 	return false
@@ -233,6 +241,9 @@ func (sortedSet *SortedSet) RemoveRange(min Border, max Border) int64 {
 	for _, element := range removed {
 		delete(sortedSet.dict, element.Member)
 	}
+	if len(removed) > 0 {
+		sortedSet.version++
+	}
 	return int64(len(removed))
 }
 
@@ -249,6 +260,9 @@ func (sortedSet *SortedSet) PopMin(count int) []*Element {
 	for _, element := range removed {
 		delete(sortedSet.dict, element.Member)
 	}
+	if len(removed) > 0 {
+		sortedSet.version++
+	}
 	return removed
 }
 
@@ -258,6 +272,9 @@ func (sortedSet *SortedSet) RemoveByRank(start int64, stop int64) int64 {
 	removed := sortedSet.skiplist.RemoveRangeByRank(start+1, stop+1)
 	for _, element := range removed {
 		delete(sortedSet.dict, element.Member)
+	}
+	if len(removed) > 0 {
+		sortedSet.version++
 	}
 	return int64(len(removed))
 }
@@ -282,11 +299,16 @@ func (sortedSet *SortedSet) ZSetScan(cursor int, count int, pattern string) ([][
 			return nil, -1
 		}
 	}
-	members := make([]string, 0, len(sortedSet.dict))
-	for member := range sortedSet.dict {
-		members = append(members, member)
+	if sortedSet.scanMembers == nil || sortedSet.scanVersion != sortedSet.version {
+		members := make([]string, 0, len(sortedSet.dict))
+		for member := range sortedSet.dict {
+			members = append(members, member)
+		}
+		sort.Strings(members)
+		sortedSet.scanMembers = members
+		sortedSet.scanVersion = sortedSet.version
 	}
-	sort.Strings(members)
+	members := sortedSet.scanMembers
 	if cursor >= len(members) {
 		return nil, 0
 	}

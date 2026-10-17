@@ -45,3 +45,18 @@ func TestSetScan(t *testing.T) {
 		return
 	}
 }
+
+func TestZSetScanInvalidation(t *testing.T) {
+	set := Make()
+	set.Add("a", 1)
+	set.Add("b", 2)
+	if keys, _ := set.ZSetScan(0, 10, "*"); len(keys) != 4 {
+		t.Fatalf("initial scan = %d items, want 4", len(keys))
+	}
+	set.Remove("a")
+	set.Add("c", 3)
+	keys, _ := set.ZSetScan(0, 10, "*")
+	if len(keys) != 4 || string(keys[0]) != "b" || string(keys[2]) != "c" {
+		t.Fatalf("scan after mutation = %q, want [b 2 c 3]", keys)
+	}
+}

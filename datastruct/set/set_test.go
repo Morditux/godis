@@ -58,3 +58,16 @@ func TestSetScan(t *testing.T) {
 		return
 	}
 }
+
+func TestSetScanInvalidation(t *testing.T) {
+	set := Make("a", "b")
+	if keys, _ := set.SetScan(0, 10, "*"); len(keys) != 2 {
+		t.Fatalf("initial scan = %d members, want 2", len(keys))
+	}
+	set.Remove("a")
+	set.Add("c")
+	keys, _ := set.SetScan(0, 10, "*")
+	if len(keys) != 2 || string(keys[0]) != "b" || string(keys[1]) != "c" {
+		t.Fatalf("scan after mutation = %q, want [b c]", keys)
+	}
+}

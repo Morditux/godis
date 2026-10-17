@@ -2,13 +2,11 @@ package database
 
 import (
 	"math"
-	"sort"
 
 	Dict "github.com/hdt3213/godis/datastruct/dict"
 	"github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/lib/utils"
-	"github.com/hdt3213/godis/lib/wildcard"
 	"github.com/hdt3213/godis/redis/protocol"
 	"strconv"
 	"strings"
@@ -530,37 +528,17 @@ func execHScan(db *DB, args [][]byte) redis.Reply {
 		return emptyScanReply()
 	}
 
-	var matchKey *wildcard.Pattern
-	if pattern != "*" {
-		matchKey, err = wildcard.CompilePattern(pattern)
-		if err != nil {
-			return protocol.MakeErrReply("ERR illegal wildcard")
-		}
+	fields, nextCursor := dict.DictScan(cursor, count, pattern)
+	if nextCursor < 0 {
+		return protocol.MakeErrReply("ERR illegal wildcard")
 	}
-	fields := dict.Keys()
-	sort.Strings(fields) // stable order for cursor pagination
-	if cursor > len(fields) {
-		cursor = len(fields)
-	}
-	result := make([][]byte, 0, count*2)
-	i := cursor
-	scanned := 0
-	for i < len(fields) && scanned < count {
-		field := fields[i]
-		i++
-		scanned++
-		if matchKey != nil && !matchKey.IsMatch(field) {
-			continue
-		}
-		value, ok := dict.Get(field)
+	result := make([][]byte, 0, len(fields)*2)
+	for _, field := range fields {
+		value, ok := dict.Get(string(field))
 		if !ok {
 			continue
 		}
-		result = append(result, []byte(field), value)
-	}
-	nextCursor := 0
-	if i < len(fields) {
-		nextCursor = i
+		result = append(result, field, value)
 	}
 	return scanReply(nextCursor, result)
 }

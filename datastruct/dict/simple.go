@@ -1,12 +1,20 @@
 package dict
 
 import (
+	"sort"
+
 	"github.com/hdt3213/godis/lib/wildcard"
 )
 
 // SimpleDict wraps a map, it is not thread safe
 type SimpleDict[V any] struct {
 	m map[string]V
+
+	// scanKeys is a sorted snapshot used by DictScan. It is rebuilt only after
+	// the key set changes, so 10k SCAN pages cost one sort instead of 10k.
+	scanKeys    []string
+	scanVersion uint64
+	version     uint64
 }
 
 // MakeSimple makes a new map
@@ -37,6 +45,7 @@ func (dict *SimpleDict[V]) Put(key string, val V) (result int) {
 	if existed {
 		return 0
 	}
+	dict.version++
 	return 1
 }
 
@@ -47,6 +56,7 @@ func (dict *SimpleDict[V]) PutIfAbsent(key string, val V) (result int) {
 		return 0
 	}
 	dict.m[key] = val
+	dict.version++
 	return 1
 }
 
@@ -65,6 +75,7 @@ func (dict *SimpleDict[V]) Remove(key string) (val V, result int) {
 	val, existed := dict.m[key]
 	if existed {
 		delete(dict.m, key)
+		dict.version++
 		return val, 1
 	}
 	return val, 0
@@ -125,18 +136,51 @@ func (dict *SimpleDict[V]) Clear() {
 	*dict = *MakeSimple[V]()
 }
 
-// DictScan traverses the whole dict (SimpleDict has no cursor concept) and
-// returns the keys matching the pattern; values are not included
+// DictScan returns a page of keys matching pattern. The cursor is the index of
+// the next key in a sorted snapshot, which is cached until the key set changes.
 func (dict *SimpleDict[V]) DictScan(cursor int, count int, pattern string) ([][]byte, int) {
-	result := make([][]byte, 0)
-	matchKey, err := wildcard.CompilePattern(pattern)
-	if err != nil {
-		return result, -1
+	if cursor < 0 {
+		return nil, -1
 	}
-	for k := range dict.m {
-		if pattern == "*" || matchKey.IsMatch(k) {
-			result = append(result, []byte(k))
+	if count <= 0 {
+		count = 10
+	}
+	if dict.scanKeys == nil || dict.scanVersion != dict.version {
+		keys := make([]string, 0, len(dict.m))
+		for k := range dict.m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		dict.scanKeys = keys
+		dict.scanVersion = dict.version
+	}
+	keys := dict.scanKeys
+	if cursor >= len(keys) {
+		return nil, 0
+	}
+	var matchKey *wildcard.Pattern
+	var err error
+	if pattern != "*" {
+		matchKey, err = wildcard.CompilePattern(pattern)
+		if err != nil {
+			return nil, -1
 		}
 	}
-	return result, 0
+	result := make([][]byte, 0, count)
+	i := cursor
+	scanned := 0
+	for i < len(keys) && scanned < count {
+		key := keys[i]
+		i++
+		scanned++
+		if matchKey != nil && !matchKey.IsMatch(key) {
+			continue
+		}
+		result = append(result, []byte(key))
+	}
+	next := 0
+	if i < len(keys) {
+		next = i
+	}
+	return result, next
 }

@@ -107,6 +107,13 @@ func (c *FakeConn) Close() error {
 	return nil
 }
 
+// IsClosed reports whether the fake connection was closed.
+func (c *FakeConn) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
 func (c *FakeConn) RemoteAddr() string {
 	return ""
 }
