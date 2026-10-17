@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/valyala/bytebufferpool"
+
 	idatabase "github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/lib/logger"
@@ -14,6 +16,12 @@ import (
 	"github.com/hdt3213/godis/database"
 	"github.com/panjf2000/gnet/v2"
 )
+
+// gnetMaxBatchPerEvent caps the commands executed per OnTraffic call so the
+// event-loop stays responsive to other connections. With very large pipelines
+// the rest is processed on subsequent events (gnet keeps delivering events
+// as long as data is buffered).
+const gnetMaxBatchPerEvent = 64
 
 type GnetServer struct {
 	gnet.BuiltinEventEngine
@@ -64,20 +72,46 @@ func (s *GnetServer) OnClose(c gnet.Conn, err error) (action gnet.Action) {
 	return
 }
 
+// OnTraffic parses and executes every command complete enough to be parsed
+// without blocking, batching all replies into a single write per event.
+// This is what makes pipelining work in gnet mode: without the drain loop
+// only one command per network event was executed, which throttled
+// redis-benchmark pipelines to the RTT.
 func (s *GnetServer) OnTraffic(c gnet.Conn) (action gnet.Action) {
-	conn := c.Context().(redis.Connection)
-	cmdLine, err := parser.ParseV2(c)
-	if err != nil {
-		logger.Infof("parse command line failed: %v", err)
+	conn, ok := c.Context().(redis.Connection)
+	if !ok || conn == nil {
 		return gnet.Close
 	}
-	if len(cmdLine) == 0 {
-		return gnet.None
+	out := bytebufferpool.Get()
+	defer bytebufferpool.Put(out)
+	for i := 0; i < gnetMaxBatchPerEvent; i++ {
+		_, complete, err := estimateCommandLength(c)
+		if err != nil {
+			logger.Infof("parse command line failed: %v", err)
+			return gnet.Close
+		}
+		if !complete {
+			// no consumption here: leftover bytes remain valid for the next event
+			break
+		}
+		cmdLine, err := parser.ParseV2(c)
+		if err != nil {
+			logger.Infof("parse command line failed: %v", err)
+			return gnet.Close
+		}
+		if len(cmdLine) == 0 {
+			// null array like *-1: nothing to execute
+			continue
+		}
+		result := s.db.Exec(conn, cmdLine)
+		if result != nil {
+			out.Write(result.ToBytes())
+		}
 	}
-	result := s.db.Exec(conn, cmdLine)
-	buffer := result.ToBytes()
-	if len(buffer) > 0 {
-		c.Write(buffer)
+	if out.Len() > 0 {
+		if _, err := c.Write(out.Bytes()); err != nil {
+			return gnet.Close
+		}
 	}
 	return gnet.None
 }

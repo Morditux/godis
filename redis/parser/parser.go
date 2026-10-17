@@ -31,10 +31,15 @@ func ParseStream(reader io.Reader) <-chan *Payload {
 	return ParseStreamWithStop(reader, nil)
 }
 
+// parseStreamChanSize smooths the hand-off between the parser goroutine and
+// its consumer. The consumer of the server uses the channel fill level to
+// batch replies, so this also enables batching under pipelining.
+const parseStreamChanSize = 64
+
 // ParseStreamWithStop behaves like ParseStream and accepts a stop channel.
 // Passing nil is equivalent to ParseStream.
 func ParseStreamWithStop(reader io.Reader, stop <-chan struct{}) <-chan *Payload {
-	ch := make(chan *Payload)
+	ch := make(chan *Payload, parseStreamChanSize)
 	go parse0(reader, ch, stop)
 	return ch
 }
@@ -43,6 +48,16 @@ func ParseStreamWithStop(reader io.Reader, stop <-chan struct{}) <-chan *Payload
 // A nil stop channel never becomes ready, which allows ParseStream to keep
 // its original blocking behavior.
 func send0(ch chan<- *Payload, stop <-chan struct{}, p *Payload) bool {
+	if stop != nil {
+		// fail fast when stop was already closed: the channel is buffered, so
+		// without this pre-check the select below would pick between the two
+		// ready cases nondeterministically and deliver payloads after stop
+		select {
+		case <-stop:
+			return false
+		default:
+		}
+	}
 	select {
 	case ch <- p:
 		return true

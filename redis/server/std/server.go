@@ -21,11 +21,17 @@ import (
 	"github.com/hdt3213/godis/redis/parser"
 	"github.com/hdt3213/godis/redis/protocol"
 	"github.com/hdt3213/godis/tcp"
+	"github.com/valyala/bytebufferpool"
 )
 
 var (
 	unknownErrReplyBytes = []byte("-ERR unknown\r\n")
 )
+
+// handleFlushThreshold caps the size of batched replies before they are
+// flushed to the client, so huge pipelined bursts don't accumulate
+// unbounded amounts of buffered bytes.
+const handleFlushThreshold = 32 << 10 // 32 KiB
 
 // Handler implements tcp.Handler and serves as a redis server
 type Handler struct {
@@ -76,22 +82,39 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	h.activeConn.Store(client, struct{}{})
 
 	ch := parser.ParseStream(conn)
+	// pipeline pipelining aware batching: replies are accumulated and flushed
+	// whenever nothing else is queued in the parse channel, so pipelined
+	// command bursts produce one write syscall per burst instead of one per
+	// command; sequential (ping-pong) clients are flushed immediately
+	out := bytebufferpool.Get()
+	defer bytebufferpool.Put(out)
+	flush := func() bool {
+		if out.Len() == 0 {
+			return true
+		}
+		if _, err := client.Write(out.Bytes()); err != nil {
+			h.closeClient(client)
+			logger.Info("connection closed: " + client.RemoteAddr())
+			return false
+		}
+		out.Reset()
+		return true
+	}
 	for payload := range ch {
 		if payload.Err != nil {
 			if payload.Err == io.EOF ||
 				payload.Err == io.ErrUnexpectedEOF ||
 				strings.Contains(payload.Err.Error(), "use of closed network connection") {
-				// connection closed
+				// connection closed, flush pending replies first
+				flush()
 				h.closeClient(client)
 				logger.Info("connection closed: " + client.RemoteAddr())
 				return
 			}
 			// protocol err
 			errReply := protocol.MakeErrReply(payload.Err.Error())
-			_, err := client.Write(errReply.ToBytes())
-			if err != nil {
-				h.closeClient(client)
-				logger.Info("connection closed: " + client.RemoteAddr())
+			out.Write(errReply.ToBytes())
+			if out.Len() >= handleFlushThreshold && !flush() {
 				return
 			}
 			continue
@@ -107,9 +130,16 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		}
 		result := h.db.Exec(client, r.Args)
 		if result != nil {
-			_, _ = client.Write(result.ToBytes())
+			out.Write(result.ToBytes())
 		} else {
-			_, _ = client.Write(unknownErrReplyBytes)
+			out.Write(unknownErrReplyBytes)
+		}
+		if len(ch) == 0 || out.Len() >= handleFlushThreshold {
+			// nothing else queued in the parser: flush now to keep the
+			// latency of sequential clients unchanged, or protect memory
+			if !flush() {
+				return
+			}
 		}
 	}
 }
