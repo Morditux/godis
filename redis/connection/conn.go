@@ -30,6 +30,8 @@ type Connection struct {
 	flags uint64
 	// closed marks the connection as unusable, set by Close under mu
 	closed bool
+	// doneCh is closed by Close and lets blocking commands abort.
+	doneCh chan struct{}
 
 	// subscribing channels
 	subs map[string]bool
@@ -44,6 +46,17 @@ type Connection struct {
 
 	// selected db
 	selectedDB int
+}
+
+// Done is closed when the connection is closed. Blocking commands such as
+// WAIT select on it to abort promptly on client disconnect.
+func (c *Connection) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.doneCh == nil {
+		c.doneCh = make(chan struct{})
+	}
+	return c.doneCh
 }
 
 // IsClosed reports whether Close has been called.
@@ -72,6 +85,10 @@ func (c *Connection) Close() error {
 		return nil
 	}
 	c.closed = true
+	if c.doneCh == nil {
+		c.doneCh = make(chan struct{})
+	}
+	close(c.doneCh)
 	if c.conn != nil { // may be a fake conn for tests
 		_ = c.conn.Close()
 	}
@@ -88,9 +105,10 @@ func (c *Connection) Close() error {
 
 // NewConn creates Connection instance
 func NewConn(conn net.Conn) *Connection {
-	c := &Connection{}
-	c.conn = conn
-	c.closed = false
+	c := &Connection{
+		conn:   conn,
+		doneCh: make(chan struct{}),
+	}
 	return c
 }
 

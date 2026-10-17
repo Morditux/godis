@@ -164,8 +164,35 @@ func (backlog *replBacklog) isValidOffset(offset int64) bool {
 	return offset >= backlog.beginOffset && offset < backlog.currentOffset
 }
 
+// ackNotifier wakes WAIT clients when replication state changes. The channel
+// is replaced under its own mutex, so WAIT can snapshot it before checking the
+// ACK counters without a lost-wakeup race.
+type ackNotifier struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (n *ackNotifier) notify() {
+	n.mu.Lock()
+	if n.ch != nil {
+		close(n.ch)
+	}
+	n.ch = make(chan struct{})
+	n.mu.Unlock()
+}
+
+func (n *ackNotifier) waitChan() <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.ch == nil {
+		n.ch = make(chan struct{})
+	}
+	return n.ch
+}
+
 type masterStatus struct {
 	mu           sync.RWMutex
+	ackNotifier  ackNotifier
 	replId       string
 	backlog      *replBacklog
 	slaveMap     map[redis.Connection]*slaveClient
@@ -519,22 +546,31 @@ func (server *Server) execWait(c redis.Connection, args [][]byte) redis.Reply {
 	if numReplicas == 0 {
 		return protocol.MakeIntReply(0)
 	}
-	var deadline time.Time
+	var clientDone <-chan struct{}
+	if c != nil {
+		if notifier, ok := c.(interface{ Done() <-chan struct{} }); ok {
+			clientDone = notifier.Done()
+		}
+	}
+	var timer *time.Timer
+	var timeoutCh <-chan time.Time
 	if timeoutMs > 0 {
 		maxTimeoutMs := int64(^uint64(0)>>1) / int64(time.Millisecond)
 		if int64(timeoutMs) > maxTimeoutMs {
 			timeoutMs = int(maxTimeoutMs)
 		}
-		deadline = time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+		timer = time.NewTimer(time.Duration(timeoutMs) * time.Millisecond)
+		timeoutCh = timer.C
+		defer timer.Stop()
 	}
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
+
 	for {
+		// snapshot the wake channel before reading the counters: an ACK that
+		// lands between the count and the select closes this channel, so the
+		// wakeup cannot be lost.
+		waitCh := server.masterStatus.ackNotifier.waitChan()
 		acked := server.countAckedSlaves(target)
 		if acked >= numReplicas {
-			return protocol.MakeIntReply(int64(acked))
-		}
-		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return protocol.MakeIntReply(int64(acked))
 		}
 		if c != nil {
@@ -542,10 +578,24 @@ func (server *Server) execWait(c redis.Connection, args [][]byte) redis.Reply {
 				return protocol.MakeIntReply(int64(acked))
 			}
 		}
-		select {
-		case <-ticker.C:
-		case <-server.closeChan:
-			return protocol.MakeIntReply(int64(acked))
+		if timeoutCh != nil {
+			select {
+			case <-waitCh:
+			case <-timeoutCh:
+				return protocol.MakeIntReply(int64(server.countAckedSlaves(target)))
+			case <-server.closeChan:
+				return protocol.MakeIntReply(int64(acked))
+			case <-clientDone:
+				return protocol.MakeIntReply(int64(acked))
+			}
+		} else {
+			select {
+			case <-waitCh:
+			case <-server.closeChan:
+				return protocol.MakeIntReply(int64(acked))
+			case <-clientDone:
+				return protocol.MakeIntReply(int64(acked))
+			}
 		}
 	}
 }
@@ -634,6 +684,7 @@ func (server *Server) execReplConf(c redis.Connection, args [][]byte) redis.Repl
 			}
 			slave.lastAckTime = time.Now()
 			slave.mu.Unlock()
+			server.masterStatus.ackNotifier.notify()
 			return &protocol.NoReply{}
 		}
 	}
@@ -643,12 +694,13 @@ func (server *Server) execReplConf(c redis.Connection, args [][]byte) redis.Repl
 func (server *Server) removeSlave(slave *slaveClient) {
 	slave.stopSender()
 	server.masterStatus.mu.Lock()
-	defer server.masterStatus.mu.Unlock()
 	_ = slave.conn.Close()
 	delete(server.masterStatus.slaveMap, slave.conn)
 	delete(server.masterStatus.waitSlaves, slave)
 	delete(server.masterStatus.onlineSlaves, slave)
 	logger.Info("disconnect with slave " + slave.conn.Name())
+	server.masterStatus.mu.Unlock()
+	server.masterStatus.ackNotifier.notify()
 }
 
 func (server *Server) setSlaveOnline(slave *slaveClient, currentOffset int64) {
@@ -674,6 +726,7 @@ func (server *Server) setSlaveOnline(slave *slaveClient, currentOffset int64) {
 		go server.slaveSender(slave)
 	}
 	slave.notify()
+	server.masterStatus.ackNotifier.notify()
 }
 
 var pingBytes = protocol.MakeMultiBulkReply(utils.ToCmdLine("ping")).ToBytes()
@@ -752,6 +805,7 @@ func (server *Server) initMasterStatus() {
 		onlineSlaves: make(map[*slaveClient]struct{}),
 		bgSaveState:  bgSaveIdle,
 		rdbFilename:  "",
+		ackNotifier:  ackNotifier{ch: make(chan struct{})},
 	}
 }
 
@@ -780,6 +834,7 @@ func (server *Server) stopMaster() {
 	server.masterStatus.waitSlaves = make(map[*slaveClient]struct{})
 	server.masterStatus.onlineSlaves = make(map[*slaveClient]struct{})
 	server.masterStatus.bgSaveState = bgSaveIdle
+	server.masterStatus.ackNotifier.notify()
 }
 
 // execWaitCommand is only metadata: Server.Exec intercepts WAIT before routing

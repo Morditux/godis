@@ -16,6 +16,7 @@ type FakeConn struct {
 	offset int
 	waitOn chan struct{}
 	closed bool
+	doneCh chan struct{}
 	mu     sync.Mutex
 }
 
@@ -101,10 +102,26 @@ func (c *FakeConn) Bytes() []byte {
 
 func (c *FakeConn) Close() error {
 	c.mu.Lock()
-	c.closed = true
+	if !c.closed {
+		c.closed = true
+		if c.doneCh == nil {
+			c.doneCh = make(chan struct{})
+		}
+		close(c.doneCh)
+	}
 	c.mu.Unlock()
 	c.notify()
 	return nil
+}
+
+// Done is closed when the fake connection is closed.
+func (c *FakeConn) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.doneCh == nil {
+		c.doneCh = make(chan struct{})
+	}
+	return c.doneCh
 }
 
 // IsClosed reports whether the fake connection was closed.

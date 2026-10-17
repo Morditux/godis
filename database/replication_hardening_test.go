@@ -150,6 +150,7 @@ func TestWaitWakesWhenAckArrives(t *testing.T) {
 	slave.mu.Lock()
 	slave.ackOffset = 10
 	slave.mu.Unlock()
+	server.masterStatus.ackNotifier.notify()
 
 	select {
 	case got := <-result:
@@ -255,4 +256,35 @@ func TestNotifySlavesDoesNotBlockOnSlowReplica(t *testing.T) {
 
 	close(blocking.release)
 	server.removeSlave(slave)
+}
+
+func TestWaitWakesOnReplConfAck(t *testing.T) {
+	server := newReplicationTestServer(t)
+	conn := connection.NewFakeConn()
+	slave := newSlaveClient(conn)
+	slave.sendOffset = 10
+	server.masterStatus.mu.Lock()
+	server.masterStatus.backlog = &replBacklog{currentOffset: 10}
+	server.masterStatus.slaveMap[conn] = slave
+	server.masterStatus.onlineSlaves[slave] = struct{}{}
+	server.masterStatus.mu.Unlock()
+
+	result := make(chan string, 1)
+	go func() {
+		result <- string(server.execWait(conn, [][]byte{[]byte("1"), []byte("1000")}).ToBytes())
+	}()
+	time.Sleep(20 * time.Millisecond)
+	reply := server.execReplConf(conn, [][]byte{[]byte("ACK"), []byte("10")})
+	if _, ok := reply.(*protocol.NoReply); !ok {
+		t.Fatalf("REPLCONF ACK = %T, want NoReply", reply)
+	}
+
+	select {
+	case got := <-result:
+		if got != ":1\r\n" {
+			t.Fatalf("WAIT = %q, want :1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WAIT did not wake up after REPLCONF ACK")
+	}
 }
