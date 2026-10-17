@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hdt3213/godis/lib/logger"
 	"github.com/hdt3213/godis/lib/sync/wait"
 )
 
@@ -47,25 +46,22 @@ type Connection struct {
 	selectedDB int
 }
 
-var connPool = sync.Pool{
-	New: func() interface{} {
-		return &Connection{}
-	},
-}
-
 // RemoteAddr returns the remote network address
 func (c *Connection) RemoteAddr() string {
+	if c.conn == nil {
+		return ""
+	}
 	return c.conn.RemoteAddr().String()
 }
 
 // Close disconnect with the client. Calling it repeatedly is safe.
+// Connections are not pooled: recycling a struct while a handler or the
+// pub/sub hub still holds its pointer caused use-after-recycle bugs.
 func (c *Connection) Close() error {
 	c.sendingData.WaitWithTimeout(10 * time.Second)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		// Handler.Close and Handle's closeClient may both close the
-		// connection; resetting state twice would corrupt a recycled one
 		return nil
 	}
 	c.closed = true
@@ -78,21 +74,14 @@ func (c *Connection) Close() error {
 	c.watching = nil
 	c.txErrors = nil
 	c.selectedDB = 0
-	// reset role/multi flags as well, otherwise they leak into a recycled connection
+	// reset role/multi flags as well
 	c.flags = 0
-	connPool.Put(c)
 	return nil
 }
 
 // NewConn creates Connection instance
 func NewConn(conn net.Conn) *Connection {
-	c, ok := connPool.Get().(*Connection)
-	if !ok {
-		logger.Error("connection pool make wrong type")
-		return &Connection{
-			conn: conn,
-		}
-	}
+	c := &Connection{}
 	c.conn = conn
 	c.closed = false
 	return c

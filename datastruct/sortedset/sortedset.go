@@ -1,6 +1,7 @@
 package sortedset
 
 import (
+	"sort"
 	"strconv"
 
 	"github.com/hdt3213/godis/lib/wildcard"
@@ -261,21 +262,54 @@ func (sortedSet *SortedSet) RemoveByRank(start int64, stop int64) int64 {
 	return int64(len(removed))
 }
 
+// ZSetScan returns (member, score) pairs. The cursor is the index of the next
+// member in a sorted snapshot of the members.
 func (sortedSet *SortedSet) ZSetScan(cursor int, count int, pattern string) ([][]byte, int) {
-	result := make([][]byte, 0)
-	matchKey, err := wildcard.CompilePattern(pattern)
-	if err != nil {
-		return result, -1
+	if sortedSet == nil {
+		return nil, 0
 	}
-	for k := range sortedSet.dict {
-		if pattern == "*" || matchKey.IsMatch(k) {
-			elem, exists := sortedSet.dict[k]
-			if !exists {
-				continue
-			}
-			result = append(result, []byte(k))
-			result = append(result, []byte(strconv.FormatFloat(elem.Score, 'f', -1, 64)))
+	if cursor < 0 {
+		return nil, -1
+	}
+	if count <= 0 {
+		count = 10
+	}
+	var matchKey *wildcard.Pattern
+	var err error
+	if pattern != "*" {
+		matchKey, err = wildcard.CompilePattern(pattern)
+		if err != nil {
+			return nil, -1
 		}
 	}
-	return result, 0
+	members := make([]string, 0, len(sortedSet.dict))
+	for member := range sortedSet.dict {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+	if cursor >= len(members) {
+		return nil, 0
+	}
+	result := make([][]byte, 0, count*2)
+	i := cursor
+	scanned := 0
+	for i < len(members) && scanned < count {
+		member := members[i]
+		i++
+		scanned++
+		if matchKey != nil && !matchKey.IsMatch(member) {
+			continue
+		}
+		element, exists := sortedSet.dict[member]
+		if !exists {
+			continue
+		}
+		result = append(result, []byte(member))
+		result = append(result, []byte(strconv.FormatFloat(element.Score, 'f', -1, 64)))
+	}
+	next := 0
+	if i < len(members) {
+		next = i
+	}
+	return result, next
 }

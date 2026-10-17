@@ -11,6 +11,8 @@ import (
 // parseScanOptions parses the MATCH/COUNT [/TYPE] options shared by SCAN,
 // SSCAN, HSCAN and ZSCAN. It validates that every option has a value, which
 // used to panic with an index-out-of-range on e.g. "SCAN 0 COUNT".
+const maxScanCount = 1 << 20
+
 func parseScanOptions(args [][]byte, start int, allowType bool) (pattern string, count int, scanType string, errReply redis.Reply) {
 	pattern = "*"
 	count = 10
@@ -23,6 +25,9 @@ func parseScanOptions(args [][]byte, start int, allowType bool) (pattern string,
 			n, err := strconv.Atoi(string(args[i+1]))
 			if err != nil || n <= 0 {
 				return "", 0, "", &protocol.SyntaxErrReply{}
+			}
+			if n > maxScanCount {
+				n = maxScanCount
 			}
 			count = n
 			i++
@@ -43,4 +48,17 @@ func parseScanOptions(args [][]byte, start int, allowType bool) (pattern string,
 		}
 	}
 	return pattern, count, scanType, nil
+}
+
+// scanReply formats the [cursor, items] two-element reply used by *SCAN.
+func scanReply(cursor int, items [][]byte) redis.Reply {
+	return protocol.MakeMultiRawReply([]redis.Reply{
+		protocol.MakeBulkReply([]byte(strconv.Itoa(cursor))),
+		protocol.MakeMultiBulkReply(items),
+	})
+}
+
+// emptyScanReply is the reply for scanning a missing key.
+func emptyScanReply() redis.Reply {
+	return scanReply(0, nil)
 }

@@ -49,6 +49,18 @@ var (
 
 var errLineTooLong = errors.New("protocol error: line too long")
 
+// errUnexpectedEOF marks a command truncated in the middle of its RESP body.
+// A clean EOF at a command boundary remains io.EOF, so consumers such as the
+// AOF loader can distinguish an empty tail from data loss.
+var errUnexpectedEOF = errors.New("protocol error: unexpected end of stream")
+
+func normalizeReadErr(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return errUnexpectedEOF
+	}
+	return err
+}
+
 // readLine reads a CRLF-terminated line with a bounded allocation. Using
 // bufio.Reader.ReadBytes would allocate the whole line before any size check.
 func readLineBounded(reader *bufio.Reader) ([]byte, error) {
@@ -221,7 +233,7 @@ func parseBulkString(header []byte, reader *bufio.Reader, ch chan<- *Payload, st
 	body := make([]byte, strLen+2)
 	_, err = io.ReadFull(reader, body)
 	if err != nil {
-		return err
+		return normalizeReadErr(err)
 	}
 	if !send0(ch, stop, &Payload{Data: protocol.MakeBulkReply(body[:len(body)-2])}) {
 		return nil
@@ -233,7 +245,7 @@ func parseBulkString(header []byte, reader *bufio.Reader, ch chan<- *Payload, st
 func parseRDBBulkString(reader *bufio.Reader, ch chan<- *Payload, stop <-chan struct{}) error {
 	header, err := readLineBounded(reader)
 	if err != nil {
-		return errors.New("failed to read bytes")
+		return normalizeReadErr(err)
 	}
 	header = bytes.TrimSuffix(header, []byte{'\r', '\n'})
 	if len(header) == 0 {
@@ -280,7 +292,7 @@ func parseArray(header []byte, reader *bufio.Reader, ch chan<- *Payload, stop <-
 		var line []byte
 		line, err = readLineBounded(reader)
 		if err != nil {
-			return err
+			return normalizeReadErr(err)
 		}
 		length := len(line)
 		if length < 4 || line[length-2] != '\r' || line[0] != '$' {
@@ -299,7 +311,7 @@ func parseArray(header []byte, reader *bufio.Reader, ch chan<- *Payload, stop <-
 			body := make([]byte, strLen+2)
 			_, err := io.ReadFull(reader, body)
 			if err != nil {
-				return err
+				return normalizeReadErr(err)
 			}
 			lines = append(lines, body[:len(body)-2])
 		}

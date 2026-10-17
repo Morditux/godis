@@ -158,3 +158,11 @@ func TestParseStreamWithStop(t *testing.T) {
 	}
 	t.Fatalf("parse goroutine leaked: before=%d, now=%d", before, runtime.NumGoroutine())
 }
+
+func TestTruncatedCommandIsAnError(t *testing.T) {
+	// a clean EOF is io.EOF, but a command cut in the middle must not be
+	// mistaken for a normal end of stream (e.g. during AOF replay)
+	if _, err := ParseOne([]byte("*2\r\n$3\r\nSET\r\n")); err == nil {
+		t.Fatal("truncated multi-bulk command was accepted as a clean EOF")
+	}
+}

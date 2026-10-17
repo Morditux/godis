@@ -192,14 +192,23 @@ func (db *DB) PutEntity(key string, entity *database.DataEntity) int {
 	return ret
 }
 
-// PutIfExists edit an existing DataEntity
+// PutIfExists edit an existing DataEntity. An expired key is treated as
+// absent, so SET XX does not resurrect a dead value.
 func (db *DB) PutIfExists(key string, entity *database.DataEntity) int {
+	if db.IsExpired(key) {
+		db.Remove(key)
+		return 0
+	}
 	db.clearExpiredTTL(key)
 	return db.data.PutIfExistsWithLock(key, entity)
 }
 
-// PutIfAbsent insert an DataEntity only if the key not exists
+// PutIfAbsent insert an DataEntity only if the key not exists. An expired key
+// is removed first so SET NX can create the key again.
 func (db *DB) PutIfAbsent(key string, entity *database.DataEntity) int {
+	if db.IsExpired(key) {
+		db.Remove(key)
+	}
 	db.clearExpiredTTL(key)
 	ret := db.data.PutIfAbsentWithLock(key, entity)
 	// db.insertCallback may be set as nil, during `if` and actually callback

@@ -14,6 +14,7 @@ type Pattern struct {
 var replaceMap = map[byte]string{
 	// characters in the wildcard that must be escaped in the regexp
 	'+': `\+`,
+	'(': `\(`,
 	')': `\)`,
 	'$': `\$`,
 	'.': `\.`,
@@ -36,8 +37,9 @@ func CompilePattern(src string) (*Pattern, error) {
 			if i == len(src)-1 {
 				return nil, errors.New(errEndWithEscape)
 			}
-			regexSrc.WriteByte(ch)
-			regexSrc.WriteByte(src[i+1])
+			// a backslash escapes the next character literally: \d must match
+			// "d", not the regexp digit class.
+			regexSrc.WriteString(regexp.QuoteMeta(string(src[i+1])))
 			i++ // skip escaped character
 		} else if ch == '^' {
 			if i == 0 {
@@ -64,7 +66,12 @@ func CompilePattern(src string) (*Pattern, error) {
 	regexSrc.WriteByte('$')
 	re, err := regexp.Compile(regexSrc.String())
 	if err != nil {
-		return nil, err
+		// Redis treats malformed character classes as literals; fall back to
+		// a literal match instead of rejecting e.g. KEYS "a[b".
+		re, err = regexp.Compile("^" + regexp.QuoteMeta(src) + "$")
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Pattern{
 		exp: re,

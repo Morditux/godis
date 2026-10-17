@@ -2,11 +2,13 @@ package database
 
 import (
 	"math"
+	"sort"
 
 	Dict "github.com/hdt3213/godis/datastruct/dict"
 	"github.com/hdt3213/godis/interface/database"
 	"github.com/hdt3213/godis/interface/redis"
 	"github.com/hdt3213/godis/lib/utils"
+	"github.com/hdt3213/godis/lib/wildcard"
 	"github.com/hdt3213/godis/redis/protocol"
 	"strconv"
 	"strings"
@@ -42,10 +44,11 @@ func (db *DB) getOrInitDict(key string) (dict Dict.Dict[[]byte], inited bool, er
 
 // execHSet sets field in hash table
 func execHSet(db *DB, args [][]byte) redis.Reply {
-	// parse args
+	// HSET key field value [field value ...]
+	if len(args) < 3 || len(args)%2 == 0 {
+		return protocol.MakeArgNumErrReply("hset")
+	}
 	key := string(args[0])
-	field := string(args[1])
-	value := args[2]
 
 	// get or init entity
 	dict, _, errReply := db.getOrInitDict(key)
@@ -53,15 +56,23 @@ func execHSet(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 
-	result := dict.Put(field, value)
+	added := 0
+	for i := 1; i < len(args); i += 2 {
+		if dict.Put(string(args[i]), args[i+1]) > 0 {
+			added++
+		}
+	}
 	db.addAof(utils.ToCmdLine3("hset", args...))
-	return protocol.MakeIntReply(int64(result))
+	return protocol.MakeIntReply(int64(added))
 }
 
 func undoHSet(db *DB, args [][]byte) []CmdLine {
 	key := string(args[0])
-	field := string(args[1])
-	return rollbackHashFields(db, key, field)
+	fields := make([]string, 0, len(args)/2)
+	for i := 1; i < len(args); i += 2 {
+		fields = append(fields, string(args[i]))
+	}
+	return rollbackHashFields(db, key, fields...)
 }
 
 // execHSetNX sets field in hash table only if field not exists
@@ -506,33 +517,56 @@ func execHScan(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	key := string(args[0])
+	cursor, err := strconv.Atoi(string(args[1]))
+	if err != nil || cursor < 0 {
+		return protocol.MakeErrReply("ERR invalid cursor")
+	}
 	// get entity
 	dict, errReply := db.getAsDict(key)
 	if errReply != nil {
 		return errReply
 	}
 	if dict == nil {
-		return &protocol.NullBulkReply{}
-	}
-	cursor, err := strconv.Atoi(string(args[1]))
-	if err != nil || cursor < 0 {
-		return protocol.MakeErrReply("ERR invalid cursor")
+		return emptyScanReply()
 	}
 
-	keysReply, nextCursor := dict.DictScan(cursor, count, pattern)
-	if nextCursor < 0 {
-		return protocol.MakeErrReply("Invalid argument")
+	var matchKey *wildcard.Pattern
+	if pattern != "*" {
+		matchKey, err = wildcard.CompilePattern(pattern)
+		if err != nil {
+			return protocol.MakeErrReply("ERR illegal wildcard")
+		}
 	}
-
-	result := make([]redis.Reply, 2)
-	result[0] = protocol.MakeBulkReply([]byte(strconv.FormatInt(int64(nextCursor), 10)))
-	result[1] = protocol.MakeMultiBulkReply(keysReply)
-
-	return protocol.MakeMultiRawReply(result)
+	fields := dict.Keys()
+	sort.Strings(fields) // stable order for cursor pagination
+	if cursor > len(fields) {
+		cursor = len(fields)
+	}
+	result := make([][]byte, 0, count*2)
+	i := cursor
+	scanned := 0
+	for i < len(fields) && scanned < count {
+		field := fields[i]
+		i++
+		scanned++
+		if matchKey != nil && !matchKey.IsMatch(field) {
+			continue
+		}
+		value, ok := dict.Get(field)
+		if !ok {
+			continue
+		}
+		result = append(result, []byte(field), value)
+	}
+	nextCursor := 0
+	if i < len(fields) {
+		nextCursor = i
+	}
+	return scanReply(nextCursor, result)
 }
 
 func init() {
-	registerCommand("HSet", execHSet, writeFirstKey, undoHSet, 4, flagWrite).
+	registerCommand("HSet", execHSet, writeFirstKey, undoHSet, -4, flagWrite).
 		attachCommandExtra([]string{redisFlagWrite, redisFlagDenyOOM, redisFlagFast}, 1, 1, 1)
 	registerCommand("HSetNX", execHSetNX, writeFirstKey, undoHSet, 4, flagWrite).
 		attachCommandExtra([]string{redisFlagWrite, redisFlagDenyOOM, redisFlagFast}, 1, 1, 1)

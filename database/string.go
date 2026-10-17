@@ -130,63 +130,90 @@ func execSet(db *DB, args [][]byte) redis.Reply {
 	key := string(args[0])
 	value := args[1]
 	policy := upsertPolicy
-	ttl := unlimitedTTL
+	getOld := false
+	keepTTL := false
+	hasExpire := false
+	var expireAt time.Time
 
 	// parse options
-	if len(args) > 2 {
-		for i := 2; i < len(args); i++ {
-			arg := strings.ToUpper(string(args[i]))
-			if arg == "NX" { // insert
-				if policy == updatePolicy {
-					return &protocol.SyntaxErrReply{}
-				}
-				policy = insertPolicy
-			} else if arg == "XX" { // update policy
-				if policy == insertPolicy {
-					return &protocol.SyntaxErrReply{}
-				}
-				policy = updatePolicy
-			} else if arg == "EX" { // ttl in seconds
-				if ttl != unlimitedTTL {
-					// ttl has been set
-					return &protocol.SyntaxErrReply{}
-				}
-				if i+1 >= len(args) {
-					return &protocol.SyntaxErrReply{}
-				}
-				ttlArg, err := strconv.ParseInt(string(args[i+1]), 10, 64)
-				if err != nil {
-					return &protocol.SyntaxErrReply{}
-				}
-				if ttlArg <= 0 {
-					return protocol.MakeErrReply("ERR invalid expire time in set")
-				}
-				if ttlArg > maxTTLSeconds {
-					return protocol.MakeErrReply(invalidExpireErr("set"))
-				}
-				ttl = ttlArg * 1000
-				i++ // skip next arg
-			} else if arg == "PX" { // ttl in milliseconds
-				if ttl != unlimitedTTL {
-					return &protocol.SyntaxErrReply{}
-				}
-				if i+1 >= len(args) {
-					return &protocol.SyntaxErrReply{}
-				}
-				ttlArg, err := strconv.ParseInt(string(args[i+1]), 10, 64)
-				if err != nil {
-					return &protocol.SyntaxErrReply{}
-				}
-				if ttlArg <= 0 {
-					return protocol.MakeErrReply("ERR invalid expire time in set")
-				}
-				if ttlArg > maxTTLMillis {
-					return protocol.MakeErrReply(invalidExpireErr("set"))
-				}
-				ttl = ttlArg
-				i++ // skip next arg
-			} else {
+	for i := 2; i < len(args); i++ {
+		option := strings.ToUpper(string(args[i]))
+		switch option {
+		case "NX": // insert
+			if policy == updatePolicy {
 				return &protocol.SyntaxErrReply{}
+			}
+			policy = insertPolicy
+		case "XX": // update policy
+			if policy == insertPolicy {
+				return &protocol.SyntaxErrReply{}
+			}
+			policy = updatePolicy
+		case "GET":
+			getOld = true
+		case "KEEPTTL":
+			if keepTTL || hasExpire {
+				return &protocol.SyntaxErrReply{}
+			}
+			keepTTL = true
+		case "EX", "PX", "EXAT", "PXAT":
+			if keepTTL || hasExpire {
+				return &protocol.SyntaxErrReply{}
+			}
+			if i+1 >= len(args) {
+				return &protocol.SyntaxErrReply{}
+			}
+			raw, err := strconv.ParseInt(string(args[i+1]), 10, 64)
+			if err != nil {
+				return &protocol.SyntaxErrReply{}
+			}
+			if raw <= 0 {
+				return protocol.MakeErrReply("ERR invalid expire time in set")
+			}
+			now := time.Now()
+			switch option {
+			case "EX":
+				if raw > maxTTLSeconds {
+					return protocol.MakeErrReply(invalidExpireErr("set"))
+				}
+				expireAt = now.Add(time.Duration(raw) * time.Second)
+			case "PX":
+				if raw > maxTTLMillis {
+					return protocol.MakeErrReply(invalidExpireErr("set"))
+				}
+				expireAt = now.Add(time.Duration(raw) * time.Millisecond)
+			case "EXAT":
+				if raw > maxUnixSeconds || raw < minUnixSeconds {
+					return protocol.MakeErrReply(invalidExpireErr("set"))
+				}
+				expireAt = time.Unix(raw, 0)
+			case "PXAT":
+				if raw > maxUnixMillis || raw < minUnixMillis {
+					return protocol.MakeErrReply(invalidExpireErr("set"))
+				}
+				expireAt = time.Unix(0, raw*int64(time.Millisecond))
+			}
+			hasExpire = true
+			i++ // skip the value
+		default:
+			return &protocol.SyntaxErrReply{}
+		}
+	}
+
+	// GET returns the old string and must reject a non-string target before
+	// mutating anything (Redis aborts the SET in that case).
+	var oldValue []byte
+	var oldExists bool
+	if getOld || keepTTL {
+		entity, exists := db.GetEntity(key)
+		if exists {
+			oldExists = true
+			if getOld {
+				bytes, ok := entity.Data.([]byte)
+				if !ok {
+					return &protocol.WrongTypeErrReply{}
+				}
+				oldValue = bytes
 			}
 		}
 	}
@@ -206,21 +233,33 @@ func execSet(db *DB, args [][]byte) redis.Reply {
 		result = db.PutIfExists(key, entity)
 	}
 	if result > 0 {
-		if ttl != unlimitedTTL {
-			expireTime := time.Now().Add(time.Duration(ttl) * time.Millisecond)
-			db.Expire(key, expireTime)
+		switch {
+		case hasExpire:
+			db.Expire(key, expireAt)
+			// persist the absolute deadline, not the relative option: replaying
+			// "EX 10" later would extend the ttl.
 			db.addAof(CmdLine{
 				[]byte("SET"),
 				args[0],
 				args[1],
 			})
-			db.addAof(aof.MakeExpireCmd(key, expireTime).Args)
-		} else {
+			db.addAof(aof.MakeExpireCmd(key, expireAt).Args)
+		case keepTTL:
+			// PutEntity preserved the existing deadline; keep the option in
+			// the AOF so a replay does not clear it.
+			db.addAof(utils.ToCmdLine3("set", args...))
+		default:
 			db.Persist(key) // override ttl
 			db.addAof(utils.ToCmdLine3("set", args...))
 		}
 	}
 
+	if getOld {
+		if oldExists {
+			return protocol.MakeBulkReply(oldValue)
+		}
+		return &protocol.NullBulkReply{}
+	}
 	if result > 0 {
 		return &protocol.OkReply{}
 	}

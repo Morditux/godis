@@ -45,6 +45,9 @@ type Server struct {
 
 	// saveMu serializes SAVE/BGSAVE; it is independent from AOF.
 	saveMu sync.Mutex
+	// closeChan stops background cron goroutines; closeOnce makes Close idempotent.
+	closeChan chan struct{}
+	closeOnce sync.Once
 }
 
 func fileExists(filename string) bool {
@@ -54,7 +57,7 @@ func fileExists(filename string) bool {
 
 // NewStandaloneServer creates a standalone redis server, with multi database and all other funtions
 func NewStandaloneServer() *Server {
-	server := &Server{}
+	server := &Server{closeChan: make(chan struct{})}
 	if config.Properties.Databases == 0 {
 		config.Properties.Databases = 16
 	}
@@ -235,12 +238,23 @@ func (server *Server) AfterClientClose(c redis.Connection) {
 
 // Close graceful shutdown database
 func (server *Server) Close() {
-	// stop slaveStatus first
-	server.slaveStatus.close()
-	if server.persister != nil {
-		server.persister.Close()
-	}
-	server.stopMaster()
+	server.closeOnce.Do(func() {
+		if server.closeChan != nil {
+			close(server.closeChan)
+		}
+		// stop slaveStatus first
+		if server.slaveStatus != nil {
+			server.slaveStatus.close()
+		}
+		// unregister the replication listener while the persister is still
+		// running, then close it
+		if server.masterStatus != nil {
+			server.stopMaster()
+		}
+		if server.persister != nil {
+			server.persister.Close()
+		}
+	})
 }
 
 func execSelect(c redis.Connection, mdb *Server, args [][]byte) redis.Reply {
@@ -454,10 +468,16 @@ func (server *Server) Snapshot(dbIndex int) []*database.RDBEntry {
 
 func (server *Server) startReplCron() {
 	go func(mdb *Server) {
-		ticker := time.Tick(time.Second * 10)
-		for range ticker {
-			mdb.slaveCron()
-			mdb.masterCron()
+		ticker := time.NewTicker(time.Second * 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				mdb.slaveCron()
+				mdb.masterCron()
+			case <-mdb.closeChan:
+				return
+			}
 		}
 	}(server)
 }

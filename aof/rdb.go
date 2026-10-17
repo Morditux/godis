@@ -187,7 +187,9 @@ func (persister *Persister) startGenerateRDB(newListener Listener, hook func(), 
 func (persister *Persister) generateRDB(ctx *RewriteCtx) error {
 	// load aof tmpFile
 	tmpHandler := persister.newRewriteHandler()
-	tmpHandler.LoadAof(int(ctx.fileSize))
+	if err := tmpHandler.LoadAof(int(ctx.fileSize)); err != nil {
+		return err
+	}
 	return encodeRDB(tmpHandler.db, ctx.tmpFile)
 }
 

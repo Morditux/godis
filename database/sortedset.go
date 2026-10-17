@@ -39,51 +39,178 @@ func (db *DB) getOrInitSortedSet(key string) (sortedSet *SortedSet.SortedSet, in
 	return sortedSet, inited, nil
 }
 
-// execZAdd adds member into sorted set
-func execZAdd(db *DB, args [][]byte) redis.Reply {
-	if len(args)%2 != 1 {
-		return protocol.MakeSyntaxErrReply()
-	}
-	key := string(args[0])
-	size := (len(args) - 1) / 2
-	elements := make([]*SortedSet.Element, size)
-	for i := 0; i < size; i++ {
-		scoreValue := args[2*i+1]
-		member := string(args[2*i+2])
-		score, err := strconv.ParseFloat(string(scoreValue), 64)
-		if err != nil || math.IsNaN(score) {
-			return protocol.MakeErrReply("ERR value is not a valid float")
-		}
-		elements[i] = &SortedSet.Element{
-			Member: member,
-			Score:  score,
-		}
-	}
+type zAddOptions struct {
+	nx   bool
+	xx   bool
+	gt   bool
+	lt   bool
+	ch   bool
+	incr bool
+}
 
-	// get or init entity
-	sortedSet, _, errReply := db.getOrInitSortedSet(key)
+type zAddPair struct {
+	score  float64
+	member string
+}
+
+// parseZAddArgs parses ZADD's optional flags and score/member pairs.
+func parseZAddArgs(args [][]byte) (zAddOptions, []zAddPair, redis.Reply) {
+	var options zAddOptions
+	i := 1
+parseOptions:
+	for ; i < len(args); i++ {
+		switch strings.ToUpper(string(args[i])) {
+		case "NX":
+			options.nx = true
+		case "XX":
+			options.xx = true
+		case "GT":
+			options.gt = true
+		case "LT":
+			options.lt = true
+		case "CH":
+			options.ch = true
+		case "INCR":
+			options.incr = true
+		default:
+			break parseOptions
+		}
+	}
+	if options.nx && options.xx {
+		return options, nil, &protocol.SyntaxErrReply{}
+	}
+	if options.nx && (options.gt || options.lt) {
+		return options, nil, &protocol.SyntaxErrReply{}
+	}
+	if options.gt && options.lt {
+		return options, nil, &protocol.SyntaxErrReply{}
+	}
+	remaining := args[i:]
+	if len(remaining) < 2 || len(remaining)%2 != 0 {
+		return options, nil, &protocol.SyntaxErrReply{}
+	}
+	if options.incr && len(remaining) != 2 {
+		return options, nil, protocol.MakeErrReply("ERR INCR option supports a single increment-element pair")
+	}
+	pairs := make([]zAddPair, 0, len(remaining)/2)
+	for i := 0; i < len(remaining); i += 2 {
+		score, err := strconv.ParseFloat(string(remaining[i]), 64)
+		if err != nil || math.IsNaN(score) {
+			return options, nil, protocol.MakeErrReply("ERR value is not a valid float")
+		}
+		pairs = append(pairs, zAddPair{score: score, member: string(remaining[i+1])})
+	}
+	return options, pairs, nil
+}
+
+// execZAdd adds members into a sorted set with Redis's NX/XX/GT/LT/CH/INCR options.
+func execZAdd(db *DB, args [][]byte) redis.Reply {
+	options, pairs, errReply := parseZAddArgs(args)
 	if errReply != nil {
 		return errReply
 	}
-
-	i := 0
-	for _, e := range elements {
-		if sortedSet.Add(e.Member, e.Score) {
-			i++
+	key := string(args[0])
+	sortedSet, errReply := db.getAsSortedSet(key)
+	if errReply != nil {
+		return errReply
+	}
+	needCreate := false
+	if sortedSet == nil {
+		if options.xx {
+			if options.incr {
+				return &protocol.NullBulkReply{}
+			}
+			return protocol.MakeIntReply(0)
 		}
+		sortedSet = SortedSet.Make()
+		needCreate = true
 	}
 
-	db.addAof(utils.ToCmdLine3("zadd", args...))
+	added, changed := 0, 0
+	var incrScore float64
+	incrApplied := false
+	for _, pair := range pairs {
+		old, exists := sortedSet.Get(pair.member)
+		if options.nx && exists {
+			continue
+		}
+		if options.xx && !exists {
+			continue
+		}
+		if options.incr {
+			score := pair.score
+			if exists {
+				score = old.Score + pair.score
+			}
+			if math.IsNaN(score) {
+				return protocol.MakeErrReply("ERR resulting score is not a number (NaN)")
+			}
+			if exists {
+				if options.gt && score <= old.Score {
+					continue
+				}
+				if options.lt && score >= old.Score {
+					continue
+				}
+				if score != old.Score {
+					changed++
+				}
+				sortedSet.Add(pair.member, score)
+			} else {
+				sortedSet.Add(pair.member, score)
+				added++
+				changed++
+			}
+			incrScore = score
+			incrApplied = true
+			continue
+		}
+		if exists {
+			if options.gt && pair.score <= old.Score {
+				continue
+			}
+			if options.lt && pair.score >= old.Score {
+				continue
+			}
+			if pair.score != old.Score {
+				sortedSet.Add(pair.member, pair.score)
+				changed++
+			}
+			continue
+		}
+		sortedSet.Add(pair.member, pair.score)
+		added++
+		changed++
+	}
 
-	return protocol.MakeIntReply(int64(i))
+	if needCreate && sortedSet.Len() > 0 {
+		db.PutEntity(key, &database.DataEntity{Data: sortedSet})
+	}
+	if added > 0 || changed > 0 || incrApplied {
+		db.addAof(utils.ToCmdLine3("zadd", args...))
+	}
+
+	if options.incr {
+		if incrApplied {
+			return protocol.MakeBulkReply([]byte(strconv.FormatFloat(incrScore, 'f', -1, 64)))
+		}
+		return &protocol.NullBulkReply{}
+	}
+	if options.ch {
+		return protocol.MakeIntReply(int64(changed))
+	}
+	return protocol.MakeIntReply(int64(added))
 }
 
 func undoZAdd(db *DB, args [][]byte) []CmdLine {
 	key := string(args[0])
-	size := (len(args) - 1) / 2
-	fields := make([]string, size)
-	for i := 0; i < size; i++ {
-		fields[i] = string(args[2*i+2])
+	_, pairs, errReply := parseZAddArgs(args)
+	if errReply != nil {
+		return nil
+	}
+	fields := make([]string, len(pairs))
+	for i, pair := range pairs {
+		fields[i] = pair.member
 	}
 	return rollbackZSetFields(db, key, fields...)
 }
@@ -831,7 +958,7 @@ func execZScan(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if set == nil {
-		return &protocol.EmptyMultiBulkReply{}
+		return emptyScanReply()
 	}
 	cursor, err := strconv.Atoi(string(args[1]))
 	if err != nil || cursor < 0 {
@@ -842,12 +969,7 @@ func execZScan(db *DB, args [][]byte) redis.Reply {
 	if nextCursor < 0 {
 		return protocol.MakeErrReply("Invalid argument")
 	}
-
-	result := make([]redis.Reply, 2)
-	result[0] = protocol.MakeBulkReply([]byte(strconv.FormatInt(int64(nextCursor), 10)))
-	result[1] = protocol.MakeMultiBulkReply(keysReply)
-
-	return protocol.MakeMultiRawReply(result)
+	return scanReply(nextCursor, keysReply)
 }
 
 func init() {

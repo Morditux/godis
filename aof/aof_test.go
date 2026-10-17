@@ -358,3 +358,17 @@ func TestMakeExpireCmd(t *testing.T) {
 		t.Errorf("expected key in command, got %q", encoded)
 	}
 }
+
+func TestCorruptAOFFailsLoad(t *testing.T) {
+	engine := &fakeEngine{}
+	filename := filepath.Join(t.TempDir(), "corrupt.aof")
+	// truncated RESP: declares two arguments but only provides one
+	if err := os.WriteFile(filename, []byte("*2\r\n$3\r\nSET\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	persister, err := NewPersister(engine, filename, true, FsyncNo, nil)
+	if err == nil {
+		persister.Close()
+		t.Fatal("NewPersister must reject a corrupt AOF instead of silently loading a prefix")
+	}
+}

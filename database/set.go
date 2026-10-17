@@ -377,7 +377,7 @@ func execSScan(db *DB, args [][]byte) redis.Reply {
 		return errReply
 	}
 	if set == nil {
-		return &protocol.EmptyMultiBulkReply{}
+		return emptyScanReply()
 	}
 	cursor, err := strconv.Atoi(string(args[1]))
 	if err != nil || cursor < 0 {
@@ -388,12 +388,7 @@ func execSScan(db *DB, args [][]byte) redis.Reply {
 	if nextCursor < 0 {
 		return protocol.MakeErrReply("Invalid argument")
 	}
-
-	result := make([]redis.Reply, 2)
-	result[0] = protocol.MakeBulkReply([]byte(strconv.FormatInt(int64(nextCursor), 10)))
-	result[1] = protocol.MakeMultiBulkReply(keysReply)
-
-	return protocol.MakeMultiRawReply(result)
+	return scanReply(nextCursor, keysReply)
 }
 
 func init() {

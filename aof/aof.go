@@ -2,6 +2,8 @@ package aof
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -89,7 +91,9 @@ func NewPersister(db database.DBEngine, filename string, load bool, fsync string
 	persister.currentDB = 0
 	// load aof file if needed
 	if load {
-		persister.LoadAof(0)
+		if err := persister.LoadAof(0); err != nil {
+			return nil, fmt.Errorf("load aof %s: %w", filename, err)
+		}
 	}
 	aofFile, err := os.OpenFile(persister.aofFilename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -220,8 +224,10 @@ func (persister *Persister) writeAof(p *payload) {
 	}
 }
 
-// LoadAof read aof file, can only be used before Persister.listenCmd started
-func (persister *Persister) LoadAof(maxBytes int) {
+// LoadAof read aof file, can only be used before Persister.listenCmd started.
+// A malformed file or a command that cannot be replayed is an error: silently
+// keeping a partially applied AOF would hide data loss.
+func (persister *Persister) LoadAof(maxBytes int) error {
 	// persister.db.Exec may call persister.AddAof
 	// delete aofChan to prevent loaded commands back into aofChan
 	aofChan := persister.aofChan
@@ -232,11 +238,10 @@ func (persister *Persister) LoadAof(maxBytes int) {
 
 	file, err := os.Open(persister.aofFilename)
 	if err != nil {
-		if _, ok := err.(*os.PathError); ok {
-			return
+		if os.IsNotExist(err) {
+			return nil
 		}
-		logger.Warn(err)
-		return
+		return fmt.Errorf("open aof: %w", err)
 	}
 	defer file.Close()
 
@@ -245,11 +250,16 @@ func (persister *Persister) LoadAof(maxBytes int) {
 	err = persister.db.LoadRDB(decoder)
 	if err != nil {
 		// no rdb preamble
-		file.Seek(0, io.SeekStart)
+		if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+			return fmt.Errorf("rewind aof: %w", seekErr)
+		}
 	} else {
-		// has rdb preamble
-		_, _ = file.Seek(int64(decoder.GetReadCount())+1, io.SeekStart)
-		maxBytes = maxBytes - decoder.GetReadCount()
+		// has rdb preamble; GetReadCount includes the trailing checksum
+		readCount := decoder.GetReadCount()
+		if _, seekErr := file.Seek(int64(readCount), io.SeekStart); seekErr != nil {
+			return fmt.Errorf("seek aof preamble: %w", seekErr)
+		}
+		maxBytes -= readCount
 	}
 	var reader io.Reader
 	if maxBytes > 0 {
@@ -259,35 +269,39 @@ func (persister *Persister) LoadAof(maxBytes int) {
 	}
 	ch := parser.ParseStream(reader)
 	fakeConn := connection.NewFakeConn() // only used for save dbIndex
-	for p := range ch {
-		if p.Err != nil {
-			if p.Err == io.EOF {
+	for payload := range ch {
+		if payload.Err != nil {
+			if errors.Is(payload.Err, io.EOF) {
 				break
 			}
-			logger.Error("parse error: " + p.Err.Error())
-			continue
+			return fmt.Errorf("parse aof: %w", payload.Err)
 		}
-		if p.Data == nil {
-			logger.Error("empty payload")
-			continue
+		if payload.Data == nil {
+			return errors.New("invalid aof payload: empty command")
 		}
-		r, ok := p.Data.(*protocol.MultiBulkReply)
+		r, ok := payload.Data.(*protocol.MultiBulkReply)
 		if !ok {
-			logger.Error("require multi bulk protocol")
-			continue
+			return errors.New("invalid aof payload: expected multi-bulk protocol")
+		}
+		if len(r.Args) == 0 {
+			return errors.New("invalid aof payload: empty command")
 		}
 		ret := persister.db.Exec(fakeConn, r.Args)
 		if protocol.IsErrorReply(ret) {
-			logger.Error("exec err", string(ret.ToBytes()))
+			return fmt.Errorf("exec aof command %q: %s", strings.ToLower(string(r.Args[0])), string(ret.ToBytes()))
 		}
-		if strings.ToLower(string(r.Args[0])) == "select" {
-			// execSelect success, here must be no error
-			dbIndex, err := strconv.Atoi(string(r.Args[1]))
-			if err == nil {
-				persister.currentDB = dbIndex
+		if strings.EqualFold(string(r.Args[0]), "select") {
+			if len(r.Args) < 2 {
+				return errors.New("invalid select command in aof")
 			}
+			dbIndex, err := strconv.Atoi(string(r.Args[1]))
+			if err != nil {
+				return fmt.Errorf("invalid select index in aof: %w", err)
+			}
+			persister.currentDB = dbIndex
 		}
 	}
+	return nil
 }
 
 // Fsync flushes aof file to disk
@@ -313,8 +327,12 @@ func (persister *Persister) Close() {
 		// the file it may still be using
 		persister.rewriteMu.Lock()
 		defer persister.rewriteMu.Unlock()
-		persister.cancel()
-		<-persister.aofFinished // wait for aof finished
+		if persister.cancel != nil {
+			persister.cancel()
+		}
+		if persister.aofFinished != nil {
+			<-persister.aofFinished // wait for aof finished
+		}
 		if persister.aofFile != nil {
 			err := persister.aofFile.Close()
 			if err != nil {
@@ -345,7 +363,9 @@ func (persister *Persister) generateAof(ctx *RewriteCtx) error {
 	tmpFile := ctx.tmpFile
 	// load aof tmpFile
 	tmpAof := persister.newRewriteHandler()
-	tmpAof.LoadAof(int(ctx.fileSize))
+	if err := tmpAof.LoadAof(int(ctx.fileSize)); err != nil {
+		return err
+	}
 	for i := 0; i < config.Properties.Databases; i++ {
 		// select db
 		data := protocol.MakeMultiBulkReply(utils.ToCmdLine("SELECT", strconv.Itoa(i))).ToBytes()

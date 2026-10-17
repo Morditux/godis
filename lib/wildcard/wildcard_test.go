@@ -188,3 +188,28 @@ func TestWildCard(t *testing.T) {
 		return
 	}
 }
+
+func TestMalformedPatternsAreLiteral(t *testing.T) {
+	// Redis does not reject patterns with an unmatched '[' or '('.
+	for _, pattern := range []string{"a(b", "a[b", "a]b"} {
+		p, err := CompilePattern(pattern)
+		if err != nil {
+			t.Fatalf("CompilePattern(%q): %v", pattern, err)
+		}
+		if !p.IsMatch(pattern) {
+			t.Errorf("pattern %q should match itself literally", pattern)
+		}
+	}
+
+	// a backslash escapes the next character: \d matches a literal d
+	p, err := CompilePattern(`\d`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.IsMatch("d") {
+		t.Error(`\d should match "d"`)
+	}
+	if p.IsMatch("1") {
+		t.Error(`\d must not match a digit`)
+	}
+}

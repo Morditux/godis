@@ -1,6 +1,8 @@
 package set
 
 import (
+	"sort"
+
 	"github.com/hdt3213/godis/datastruct/dict"
 	"github.com/hdt3213/godis/lib/wildcard"
 )
@@ -162,19 +164,47 @@ func (set *Set) RandomDistinctMembers(limit int) []string {
 	return set.dict.RandomDistinctKeys(limit)
 }
 
-// Scan set with cursor and pattern
+// Scan set with cursor and pattern. The cursor is the index of the next
+// member in a sorted snapshot of the set, so a full iteration makes progress
+// even though the underlying dict is unordered.
 func (set *Set) SetScan(cursor int, count int, pattern string) ([][]byte, int) {
-	result := make([][]byte, 0)
-	matchKey, err := wildcard.CompilePattern(pattern)
-	if err != nil {
-		return result, -1
+	if set == nil {
+		return nil, 0
 	}
-	set.ForEach(func(member string) bool {
-		if pattern == "*" || matchKey.IsMatch(member) {
-			result = append(result, []byte(member))
+	if cursor < 0 {
+		return nil, -1
+	}
+	if count <= 0 {
+		count = 10
+	}
+	var matchKey *wildcard.Pattern
+	var err error
+	if pattern != "*" {
+		matchKey, err = wildcard.CompilePattern(pattern)
+		if err != nil {
+			return nil, -1
 		}
-		return true
-	})
-
-	return result, 0
+	}
+	members := set.ToSlice()
+	sort.Strings(members)
+	if cursor >= len(members) {
+		return nil, 0
+	}
+	result := make([][]byte, 0, count)
+	i := cursor
+	scanned := 0
+	for i < len(members) && scanned < count {
+		member := members[i]
+		i++
+		scanned++
+		if matchKey != nil && !matchKey.IsMatch(member) {
+			continue
+		}
+		result = append(result, []byte(member))
+	}
+	next := 0
+	if i < len(members) {
+		next = i
+	}
+	return result, next
 }
